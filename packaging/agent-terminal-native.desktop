@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Terminal
+Comment=Native GTK4/VTE terminal with split panes and viewers
+Exec=agent-terminal-native
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;panes;

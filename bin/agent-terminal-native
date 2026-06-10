@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Launcher for the native GTK4/VTE terminal.
+#
+# Defaults to system python3 because Ubuntu installs python3-gi and the
+# VTE introspection bindings into system Python. Set
+# AGENT_TERMINAL_NATIVE_USE_UV=1 to debug under uv instead.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ "${AGENT_TERMINAL_NATIVE_USE_UV:-0}" == "1" ]] && command -v uv >/dev/null 2>&1; then
+  exec uv run python -m agent_terminal.native_terminal "$@"
+fi
+
+exec python3 -m agent_terminal.native_terminal "$@"

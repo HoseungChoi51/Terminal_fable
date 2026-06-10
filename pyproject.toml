@@ -1,0 +1,21 @@
+[project]
+name = "agent-terminal"
+version = "0.1.0"
+description = "Native GTK4/VTE terminal with cmux-style split panes, Markdown and image viewer panes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# PyGObject and the GTK4/VTE bindings come from system packages
+# (python3-gi, gir1.2-gtk-4.0, gir1.2-vte-3.91), not from PyPI.
+dependencies = []
+
+[project.scripts]
+agent-terminal-native = "agent_terminal.native_terminal:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent_terminal"]
