@@ -1951,8 +1951,7 @@ def build_native_classes(g):
             self._pane_widgets = {}
             self._separators = []
             self._boundaries = ()
-            self._drag_boundary = None
-            self._drag_origin = 0.0
+            self._drag_index = None
 
         def set_panes(self, widgets):
             for pane_id, child in widgets.items():
@@ -2019,23 +2018,27 @@ def build_native_classes(g):
         def _on_drag_begin(self, gesture, x, y, index):
             if index >= len(self._boundaries):
                 return
-            boundary = self._boundaries[index]
-            self._drag_boundary = boundary
-            if boundary.orientation == HORIZONTAL:
-                self._drag_origin = boundary.x + boundary.width / 2.0
-            else:
-                self._drag_origin = boundary.y + boundary.height / 2.0
+            self._drag_index = index
             self._tab.begin_boundary_drag()
 
         def _on_drag_update(self, gesture, dx, dy):
-            boundary = self._drag_boundary
-            if boundary is None:
+            index = self._drag_index
+            if index is None or index >= len(self._boundaries):
                 return
-            delta = dx if boundary.orientation == HORIZONTAL else dy
-            self._tab.update_boundary(boundary, self._drag_origin + delta)
+            # The gesture reports offsets in the separator's own coordinate
+            # space, and the separator moves with the boundary mid-drag, so
+            # dx/dy shrink by however far the divider has already travelled.
+            # Anchoring to the boundary's *current* centre cancels that out
+            # and keeps the divider exactly under the pointer.
+            boundary = self._boundaries[index]
+            if boundary.orientation == HORIZONTAL:
+                position = boundary.x + boundary.width / 2.0 + dx
+            else:
+                position = boundary.y + boundary.height / 2.0 + dy
+            self._tab.update_boundary(boundary, position)
 
         def _on_drag_end(self, gesture, dx, dy):
-            self._drag_boundary = None
+            self._drag_index = None
 
     class TerminalTab:
         """One notebook page: a pane dictionary plus a split-layout tree."""
@@ -2660,6 +2663,18 @@ def build_native_classes(g):
 
         # -- dialogs ----------------------------------------------------------
 
+        @staticmethod
+        def _close_on_escape(dialog):
+            def on_key(controller, keyval, keycode, state):
+                if Gdk.keyval_name(keyval) == "Escape":
+                    dialog.close()
+                    return True
+                return False
+
+            key = Gtk.EventControllerKey()
+            key.connect("key-pressed", on_key)
+            dialog.add_controller(key)
+
         def show_shortcuts(self):
             dialog = Gtk.Window()
             dialog.set_transient_for(self)
@@ -2694,6 +2709,7 @@ def build_native_classes(g):
             box.append(scroller)
             box.append(close_button)
             dialog.set_child(box)
+            self._close_on_escape(dialog)
             dialog.present()
 
         def show_preferences(self):
@@ -2721,6 +2737,7 @@ def build_native_classes(g):
             box.append(label)
             box.append(close_button)
             dialog.set_child(box)
+            self._close_on_escape(dialog)
             dialog.present()
 
         def show_pane_leader(self):
