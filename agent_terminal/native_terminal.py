@@ -1132,6 +1132,12 @@ def is_safe_external_uri(uri) -> bool:
     return scheme in SAFE_URI_SCHEMES
 
 
+def _debug_link(message):
+    """Emit link-click diagnostics to stderr when AGENT_TERMINAL_DEBUG is set."""
+    if os.environ.get("AGENT_TERMINAL_DEBUG"):
+        print(f"[link] {message}", file=sys.stderr, flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Image helpers
 # ---------------------------------------------------------------------------
@@ -1527,33 +1533,60 @@ def build_native_classes(g):
 
         def _install_link_activation(self):
             """Open a URL under the pointer on a plain left click."""
-            self._link_press = None
             click = Gtk.GestureClick()
             click.set_button(0)  # observe every button; filter in the handler
+            # Run ahead of VTE's own button handling (the pane-focus gesture
+            # uses the same phase and fires reliably); the default bubble
+            # phase can be pre-empted when VTE claims the click sequence.
+            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_link_pressed)
             click.connect("released", self._on_link_released)
+            click.connect("cancel", self._on_link_cancel)
             self.terminal.add_controller(click)
 
         def _on_link_pressed(self, gesture, n_press, x, y):
-            self._link_press = (gesture.get_current_button(), x, y)
-
-        def _on_link_released(self, gesture, n_press, x, y):
-            press = self._link_press
-            self._link_press = None
-            if not press:
-                return
-            button, press_x, press_y = press
-            if button != Gdk.BUTTON_PRIMARY:
-                return
-            # A drag is a selection, not a click; don't hijack it.
-            if abs(x - press_x) > 4 or abs(y - press_y) > 4:
+            # Ctrl+click opens the URL under the pointer. We act on "pressed"
+            # rather than "released": VTE 0.84 claims the button sequence for
+            # its own selection handling, so our gesture never receives the
+            # matching "released". Requiring Ctrl keeps a plain click/drag free
+            # for text selection (including selecting the text of a URL);
+            # middle-click paste, right-click, and multi-click stay untouched.
+            button = gesture.get_current_button()
+            state = gesture.get_current_event_state()
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            _debug_link(f"pressed button={button} n={n_press} ctrl={ctrl} "
+                        f"at ({x:.0f},{y:.0f})")
+            if button != Gdk.BUTTON_PRIMARY or n_press != 1 or not ctrl:
                 return
             uri = self._link_at(x, y)
+            _debug_link(f"link under pointer: {uri!r}")
             if uri and is_safe_external_uri(uri):
-                try:
-                    Gtk.show_uri(None, uri, Gdk.CURRENT_TIME)
-                except Exception:
-                    pass
+                gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+                self._open_uri(uri)
+
+        def _on_link_cancel(self, gesture, sequence):
+            _debug_link("gesture cancelled (another widget claimed the click)")
+
+        def _on_link_released(self, gesture, n_press, x, y):
+            # Diagnostic only — VTE usually consumes the release first.
+            _debug_link(f"released at ({x:.0f},{y:.0f})")
+
+        def _open_uri(self, uri):
+            """Launch a URL, preferring show_uri and falling back to Gio."""
+            window = self.terminal.get_root()
+            if not isinstance(window, Gtk.Window):
+                window = None
+            try:
+                Gtk.show_uri(window, uri, Gdk.CURRENT_TIME)
+                _debug_link(f"show_uri dispatched for {uri!r}")
+                return
+            except Exception as exc:
+                _debug_link(f"show_uri failed: {exc!r}; trying Gio fallback")
+            try:
+                Gio.AppInfo.launch_default_for_uri(uri, None)
+                _debug_link(f"Gio launch dispatched for {uri!r}")
+            except Exception as exc:
+                _debug_link(f"Gio launch failed: {exc!r}")
 
         def _link_at(self, x, y):
             """Return the OSC 8 hyperlink or matched URL at widget coords."""
@@ -1561,12 +1594,13 @@ def build_native_classes(g):
                 uri = self.terminal.check_hyperlink_at(x, y)
                 if uri:
                     return uri
-            except Exception:
-                pass
+            except Exception as exc:
+                _debug_link(f"check_hyperlink_at raised: {exc!r}")
             try:
                 match, _tag = self.terminal.check_match_at(x, y)
                 return match
-            except Exception:
+            except Exception as exc:
+                _debug_link(f"check_match_at raised: {exc!r}")
                 return None
 
         def _spawn(self, command, working_directory, control_socket_path,
