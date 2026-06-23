@@ -129,6 +129,49 @@ def normalize_cursor_style(style: object) -> str:
     return DEFAULT_CURSOR_STYLE
 
 
+# Subtle per-pane background tints. Each slot blends the active palette's
+# background a little way toward one of its own accent colors, so the shift
+# adapts automatically to dark vs light palettes. Slot 0 leaves the base
+# background untouched, keeping the first/main pane neutral.
+PANE_TINT_SLOTS = (None, 2, 5, 4, 3, 6)  # palette colour indices (None = base)
+PANE_TINT_AMOUNT = 0.08
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb) -> str:
+    return "#{:02x}{:02x}{:02x}".format(
+        *(max(0, min(255, int(round(c)))) for c in rgb))
+
+
+def blend_hex(base_hex: str, accent_hex: str, amount: float) -> str:
+    """Linear-blend base toward accent by `amount` (0..1), return #rrggbb."""
+    base = _hex_to_rgb(base_hex)
+    accent = _hex_to_rgb(accent_hex)
+    return _rgb_to_hex(b + (a - b) * amount for b, a in zip(base, accent))
+
+
+def normalize_tint(slot: object) -> int:
+    """Coerce a stored tint value into a valid slot index."""
+    try:
+        return int(slot) % len(PANE_TINT_SLOTS)
+    except (TypeError, ValueError):
+        return 0
+
+
+def pane_tint_background(palette_name: object, slot: object) -> str:
+    """Background hex for a pane given its palette and tint slot."""
+    palette = PALETTES[normalize_palette(palette_name)]
+    base = palette["background"]
+    index = PANE_TINT_SLOTS[normalize_tint(slot)]
+    if index is None:
+        return base
+    return blend_hex(base, palette["colors"][index], PANE_TINT_AMOUNT)
+
+
 @dataclass(frozen=True)
 class TerminalSettings:
     font_family: str = DEFAULT_FONT_FAMILY
@@ -143,6 +186,7 @@ class TerminalSettings:
 class NativeConfig:
     pane_close_policy: str = DEFAULT_CLOSE_POLICY
     palette: str = DEFAULT_PALETTE
+    pane_tints: bool = True
 
 
 @dataclass(frozen=True)
@@ -173,6 +217,7 @@ def load_native_config(path: str | os.PathLike | None = None) -> NativeConfig:
     return NativeConfig(
         pane_close_policy=policy,
         palette=normalize_palette(data.get("palette", DEFAULT_PALETTE)),
+        pane_tints=bool(data.get("pane_tints", True)),
     )
 
 
@@ -1122,7 +1167,7 @@ ACTION_NAMES = (
     "close-active", "close-pane", "next-tab", "previous-tab",
     "split-horizontal", "split-vertical",
     "focus-left", "focus-right", "focus-up", "focus-down",
-    "fit-focused", "zoom-pane", "pane-leader",
+    "fit-focused", "zoom-pane", "pane-leader", "cycle-pane-tint",
     "move-border-left", "move-border-right", "move-border-up",
     "move-border-down",
     "grow-left", "grow-right", "grow-up", "grow-down",
@@ -1154,6 +1199,7 @@ ACCELERATORS = {
     "fit-focused": ("<Alt><Shift>f",),
     "zoom-pane": ("<Alt><Shift>Return",),
     "pane-leader": ("<Alt><Shift>space",),
+    "cycle-pane-tint": ("<Alt><Shift>c",),
     "undo-layout": ("<Alt><Shift>z",),
     "redo-layout": ("<Alt><Shift>y",),
     "copy": ("<Ctrl><Shift>c",),
@@ -1424,10 +1470,12 @@ def build_native_classes(g):
 
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
-                     extra_env=None, on_exited=None, title=None):
+                     extra_env=None, on_exited=None, title=None, tint=0):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
+            self.settings = settings
+            self.tint = normalize_tint(tint)
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1468,10 +1516,7 @@ def build_native_classes(g):
             terminal.set_cursor_blink_mode(
                 Vte.CursorBlinkMode.ON if settings.cursor_blink
                 else Vte.CursorBlinkMode.OFF)
-            palette = PALETTES[normalize_palette(settings.palette)]
-            terminal.set_colors(rgba(palette["foreground"]),
-                                rgba(palette["background"]),
-                                [rgba(value) for value in palette["colors"]])
+            self.apply_tint()
             try:
                 regex = Vte.Regex.new_for_match(URL_REGEX_PATTERN, -1,
                                                 URL_REGEX_FLAGS)
@@ -1567,6 +1612,19 @@ def build_native_classes(g):
         def _on_title_signal(self, terminal):
             self.title = terminal.get_window_title() or "Terminal"
             self._notify_title()
+
+        def apply_tint(self):
+            """Set VTE colours, overriding only the background for this pane."""
+            palette = PALETTES[normalize_palette(self.settings.palette)]
+            background = pane_tint_background(self.settings.palette, self.tint)
+            self.terminal.set_colors(
+                rgba(palette["foreground"]), rgba(background),
+                [rgba(value) for value in palette["colors"]])
+
+        def cycle_tint(self):
+            """Advance to the next tint slot and repaint live."""
+            self.tint = (self.tint + 1) % len(PANE_TINT_SLOTS)
+            self.apply_tint()
 
         def focus(self):
             self.terminal.grab_focus()
@@ -2447,6 +2505,7 @@ def build_native_classes(g):
             self.tabs = []
             self._picker_windows = []
             self._leader = None
+            self._tint_counter = 0
             self._build_header()
             self._build_body()
             self._install_actions()
@@ -2474,6 +2533,7 @@ def build_native_classes(g):
             view.append("Reset", "win.reset")
             view.append("Clear Scrollback", "win.clear-scrollback")
             view.append("Reload Pane", "win.reload-pane")
+            view.append("Cycle Pane Color", "win.cycle-pane-tint")
             menu.append_section(None, view)
             meta = Gio.Menu()
             meta.append("Keyboard Shortcuts", "win.shortcuts")
@@ -2534,7 +2594,16 @@ def build_native_classes(g):
                                    or self.options.working_directory),
                 hold_on_exit=hold_on_exit,
                 control_socket_path=self._app.control_socket_path,
-                on_exited=self._on_pane_exited, title=title)
+                on_exited=self._on_pane_exited, title=title,
+                tint=self._next_tint_slot())
+
+        def _next_tint_slot(self):
+            """Rotate through the tint ring so adjacent panes differ."""
+            if not self.options.native_config.pane_tints:
+                return 0
+            slot = self._tint_counter % len(PANE_TINT_SLOTS)
+            self._tint_counter += 1
+            return slot
 
         def create_viewer_pane(self, path):
             if is_image_path(path):
@@ -2701,6 +2770,11 @@ def build_native_classes(g):
             if pane is not None:
                 getattr(pane, method, lambda: None)()
 
+        def cycle_pane_tint(self):
+            pane = self._active_pane()
+            if pane is not None and hasattr(pane, "cycle_tint"):
+                pane.cycle_tint()
+
         def _on_search_changed(self, entry):
             pane = self._active_pane()
             if pane:
@@ -2845,6 +2919,8 @@ def build_native_classes(g):
                 tab.toggle_fit_focused(ZOOM_PANE_SHARE)
             elif name == "pane-leader":
                 self.show_pane_leader()
+            elif name == "cycle-pane-tint":
+                self.cycle_pane_tint()
             elif name.startswith("move-border-") and tab:
                 tab.move_border(name[len("move-border-"):])
             elif name.startswith("grow-") and tab:

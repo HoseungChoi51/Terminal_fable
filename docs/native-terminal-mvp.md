@@ -57,6 +57,7 @@ large enough.
 | `Alt+Shift+F` | Temporary focused-pane fit (toggle) |
 | `Alt+Shift+Enter` | Zoom pane (stronger temporary fit) |
 | `Alt+Shift+Space` | Pane control mode |
+| `Alt+Shift+C` | Cycle the active pane's background tint |
 | `Alt+Shift+Z` / `Alt+Shift+Y` | Undo / redo layout change |
 
 ### Terminal
@@ -103,6 +104,20 @@ command mode or closes it.
   `Shift+arrows` swap with the neighbor.
 - **Balance mode** — `l` local split, `a` axis, `s` subtree, `t` whole
   tab, `w` weighted, `o` spotlight, `d` tidy (equal leaf areas).
+
+## Per-pane tints
+
+New panes are given a subtle, distinct background tint so adjacent panes
+are easy to tell apart at a glance. Each tint blends the active palette's
+background a small amount (8%) toward one of that palette's own accent
+colors, so the effect adapts automatically to dark and light palettes.
+The first pane stays at the untinted base background.
+
+- `Alt+Shift+C` (or the **View → Cycle Pane Color** menu item) advances
+  the active pane through the tint ring and repaints it live.
+- New panes rotate through the ring automatically so neighbors differ.
+- Set `"pane_tints": false` in the config file to disable tinting; all
+  panes then use the palette's base background.
 
 ## File picker and control socket
 

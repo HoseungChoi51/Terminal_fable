@@ -103,6 +103,7 @@ TerminalSettings
 NativeConfig
   pane_close_policy
   palette
+  pane_tints
 
 LaunchOptions
   working_directory
@@ -127,11 +128,15 @@ The current config keys are:
 ```json
 {
   "pane_close_policy": "adjacent_expand",
-  "palette": "agent-dark"
+  "palette": "agent-dark",
+  "pane_tints": true
 }
 ```
 
 Supported close policies are `adjacent_expand` and `same_axis_reflow`.
+`pane_tints` (default `true`) gives each pane a subtle per-pane
+background tint blended from the active palette; set it to `false` to
+keep every pane on the palette's base background.
 
 ### Layout Model
 
