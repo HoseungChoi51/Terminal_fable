@@ -1430,6 +1430,7 @@ def build_native_classes(g):
             self.on_exited = on_exited
             self.terminal = Vte.Terminal()
             self._configure(settings)
+            self._install_link_activation()
             self.terminal.connect("child-exited", self._on_child_exited)
             try:
                 self.terminal.connect("window-title-changed",
@@ -1478,6 +1479,50 @@ def build_native_classes(g):
                 terminal.match_set_cursor_name(tag, "pointer")
             except Exception:
                 pass
+
+        def _install_link_activation(self):
+            """Open a URL under the pointer on a plain left click."""
+            self._link_press = None
+            click = Gtk.GestureClick()
+            click.set_button(0)  # observe every button; filter in the handler
+            click.connect("pressed", self._on_link_pressed)
+            click.connect("released", self._on_link_released)
+            self.terminal.add_controller(click)
+
+        def _on_link_pressed(self, gesture, n_press, x, y):
+            self._link_press = (gesture.get_current_button(), x, y)
+
+        def _on_link_released(self, gesture, n_press, x, y):
+            press = self._link_press
+            self._link_press = None
+            if not press:
+                return
+            button, press_x, press_y = press
+            if button != Gdk.BUTTON_PRIMARY:
+                return
+            # A drag is a selection, not a click; don't hijack it.
+            if abs(x - press_x) > 4 or abs(y - press_y) > 4:
+                return
+            uri = self._link_at(x, y)
+            if uri and is_safe_external_uri(uri):
+                try:
+                    Gtk.show_uri(None, uri, Gdk.CURRENT_TIME)
+                except Exception:
+                    pass
+
+        def _link_at(self, x, y):
+            """Return the OSC 8 hyperlink or matched URL at widget coords."""
+            try:
+                uri = self.terminal.check_hyperlink_at(x, y)
+                if uri:
+                    return uri
+            except Exception:
+                pass
+            try:
+                match, _tag = self.terminal.check_match_at(x, y)
+                return match
+            except Exception:
+                return None
 
         def _spawn(self, command, working_directory, control_socket_path,
                    extra_env):
