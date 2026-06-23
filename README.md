@@ -101,6 +101,10 @@ packaging/install.sh
 
 This installs `~/.local/bin/agent-terminal-native` and a desktop entry.
 
+To bind it to **Ctrl+Alt+T** as the default terminal and recover when a
+broken edit breaks the shortcut, see
+[`docs/default-terminal-setup.md`](docs/default-terminal-setup.md).
+
 ## Development
 
 Unit tests run headlessly (no GUI session or PyGObject needed):
