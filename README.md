@@ -9,6 +9,16 @@ This repository implements
 [`native-terminal-reproducible-development-plan.md`](native-terminal-reproducible-development-plan.md).
 The user-facing guide lives in [`docs/native-terminal-mvp.md`](docs/native-terminal-mvp.md).
 
+## Documentation
+
+Full documentation lives in [`docs/`](docs/README.md):
+
+- [Usage guide](docs/native-terminal-mvp.md) — running it, shortcuts, troubleshooting.
+- [Architecture](docs/architecture.md) — design, the pure-core / GTK-shell boundary, the layout engine.
+- [Developer guide](docs/developer-guide.md) — setup, tests, conventions, commit/release workflow.
+- [Extending](docs/extending.md) — recipes for adding actions, pane types, palettes, config, and layout ops.
+- [Decisions](docs/decisions/README.md) — ADRs explaining the major design choices.
+
 ## Requirements
 
 - Linux with a graphical session (X11 or Wayland)
