@@ -1642,6 +1642,33 @@ def build_native_classes(g):
             if error is not None:
                 self._feed_message(f"spawn failed: {error}")
 
+        def current_directory(self):
+            """Best-effort working directory of this terminal.
+
+            Prefers the shell-reported OSC 7 location; falls back to the
+            foreground process's cwd via the controlling PTY. Returns None
+            when neither is available so callers keep their own default.
+            """
+            try:
+                uri = self.terminal.get_current_directory_uri()
+            except Exception:
+                uri = None
+            if uri:
+                try:
+                    path = Gio.File.new_for_uri(uri).get_path()
+                except Exception:
+                    path = None
+                if path and os.path.isdir(path):
+                    return path
+            try:
+                pgrp = os.tcgetpgrp(self.terminal.get_pty().get_fd())
+                path = os.readlink(f"/proc/{pgrp}/cwd")
+                if os.path.isdir(path):
+                    return path
+            except Exception:
+                pass
+            return None
+
         def _feed_message(self, message):
             data = f"\r\n[{message}]\r\n".encode("utf-8")
             try:
@@ -2712,6 +2739,18 @@ def build_native_classes(g):
                     return tab
             return None
 
+        def _active_terminal_cwd(self):
+            """cwd of the focused terminal, for a new tab to inherit."""
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            getter = getattr(pane, "current_directory", None)
+            if getter is None:
+                return None
+            try:
+                return getter()
+            except Exception:
+                return None
+
         def remove_tab(self, tab):
             if tab not in self.tabs:
                 return
@@ -2931,7 +2970,8 @@ def build_native_classes(g):
                     self.notebook.set_current_page(index)
                 return
             if name == "new-tab":
-                self.add_terminal_tab()
+                self.add_terminal_tab(
+                    working_directory=self._active_terminal_cwd())
             elif name == "open-file":
                 self.open_file_picker()
             elif name == "open-markdown":
