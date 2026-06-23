@@ -1194,8 +1194,8 @@ ACCELERATORS = {
     "new-tab": ("<Ctrl><Shift>t",),
     "open-file": ("<Ctrl><Shift>o",),
     "close-active": ("<Ctrl><Shift>w",),
-    "next-tab": ("<Ctrl>Page_Down",),
-    "previous-tab": ("<Ctrl>Page_Up",),
+    "next-tab": ("<Ctrl>Page_Down", "<Ctrl>Tab"),
+    "previous-tab": ("<Ctrl>Page_Up", "<Ctrl><Shift>Tab"),
     "split-horizontal": ("<Alt><Shift>h",),
     "split-vertical": ("<Alt><Shift>v",),
     "focus-left": ("<Alt><Shift>Left",),
@@ -1338,6 +1338,19 @@ PANE_BEHAVIOR_METHODS = (
 )
 
 APP_CSS = """
+/* Compact header bar: drive the height down by shrinking the row and its
+   buttons (GTK4 sizes the bar to its tallest child). */
+headerbar { min-height: 0; padding: 0 4px; }
+headerbar button { min-height: 22px; min-width: 22px; padding: 1px 6px;
+                   margin: 2px 1px; }
+headerbar .title { font-size: 0.9em; }
+
+/* Compact notebook tabs ("tab indices"). */
+notebook > header { min-height: 0; padding: 0; margin: 0; }
+notebook > header > tabs > tab { min-height: 0; padding: 1px 8px; margin: 0;
+                                 font-size: 0.85em; }
+notebook > header > tabs > tab:checked { font-weight: 600; }
+
 .pane-separator { background-color: alpha(#8a93a5, 0.45); border-radius: 2px; }
 .pane-separator:hover { background-color: #6ea3ff; }
 .markdown-view { padding: 14px; }
