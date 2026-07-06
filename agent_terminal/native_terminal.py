@@ -1506,6 +1506,12 @@ def build_native_classes(g):
                 pass
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
+            # VTE consumes wheel events itself, so GTK's overlay scrollbar
+            # never gets revealed; use a permanent scrollbar instead. ALWAYS
+            # (not AUTOMATIC) keeps the column count stable as scrollback
+            # fills.
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
+            scroller.set_overlay_scrolling(False)
             scroller.set_hexpand(True)
             scroller.set_vexpand(True)
             self.widget = scroller
