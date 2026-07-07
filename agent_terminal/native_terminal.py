@@ -32,6 +32,7 @@ from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
+from agent_terminal.copilot import suggest as copilot_suggest
 from agent_terminal.copilot import titles as copilot_titles
 
 VERSION = "0.1.0"
@@ -1193,7 +1194,7 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-debug", "copilot-sessions",
+    "copilot-menu", "copilot-pause", "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "quit",
 )
 
@@ -1232,6 +1233,8 @@ ACCELERATORS = {
     "zoom-in": ("<Ctrl>plus", "<Ctrl>equal"),
     "zoom-out": ("<Ctrl>minus",),
     "zoom-reset": ("<Ctrl>0",),
+    "copilot-menu": ("<Ctrl><Shift>space",),
+    "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1", "<Ctrl>question"),
     "preferences": ("<Ctrl>comma",),
@@ -1423,6 +1426,23 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .shortcut-hint { background-color: alpha(#1c2128, 0.85);
                  color: alpha(#d8dee9, 0.7); font-size: 0.85em;
                  padding: 2px 12px; border-radius: 0 0 8px 8px; }
+
+/* Completion menu (copilot). */
+.copilot-menu > contents { padding: 4px; }
+.copilot-cmd { font-family: monospace; }
+.copilot-desc { font-size: 0.82em; color: alpha(currentColor, 0.6); }
+.copilot-flash { background-color: alpha(#1c2128, 0.9); color: #d8dee9;
+                 font-size: 0.85em; padding: 3px 14px; border-radius: 8px; }
+/* Risk badges, quiet to loud. */
+.risk-badge { font-size: 0.72em; padding: 0 6px; margin-left: 8px;
+              border-radius: 6px; }
+.risk-read-only { background-color: alpha(#5a7d5a, 0.35); }
+.risk-local-change { background-color: alpha(#5a6a8a, 0.4); }
+.risk-install { background-color: alpha(#8a7a3a, 0.45); }
+.risk-remote { background-color: alpha(#8a6a3a, 0.5); }
+.risk-privileged { background-color: alpha(#9a5a3a, 0.55); }
+.risk-destructive { background-color: alpha(#a03a3a, 0.7); color: #fff; }
+.risk-unknown { background-color: alpha(#6a6a6a, 0.4); }
 """
 
 SESSION_CHECKPOINT_SECONDS = 60
@@ -2871,6 +2891,7 @@ def build_native_classes(g):
             dead_keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
             dead_keys.connect("key-pressed", self._on_dead_key)
             self.add_controller(dead_keys)
+            self._completion_popover = None
             self._session_checkpoint_id = None
             if self._app.session_store is not None:
                 # Periodic checkpoint so a crash or kill still leaves a
@@ -2910,6 +2931,7 @@ def build_native_classes(g):
             view.append("Clear Scrollback", "win.clear-scrollback")
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
+            view.append("Command Menu…", "win.copilot-menu")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
@@ -3413,6 +3435,10 @@ def build_native_classes(g):
                 self._route("zoom_out")
             elif name == "zoom-reset":
                 self._route("zoom_reset")
+            elif name == "copilot-menu":
+                self.show_completion_menu()
+            elif name == "copilot-pause":
+                self.toggle_copilot_pause()
             elif name == "copilot-debug":
                 self.show_copilot_journal()
             elif name == "copilot-sessions":
@@ -3436,6 +3462,165 @@ def build_native_classes(g):
             except OSError:
                 return
             self.open_path(str(path))
+
+        # -- completion menu + pause (copilot P2) ---------------------------
+
+        def toggle_copilot_pause(self):
+            pane = self._active_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return
+            journal.paused = not journal.paused
+            self._flash_pane(pane, "Copilot paused" if journal.paused
+                             else "Copilot resumed")
+
+        def _flash_pane(self, pane, text):
+            """Briefly show a quiet chip over a terminal pane (no focus grab)."""
+            anchor = getattr(pane, "terminal", None)
+            if anchor is None:
+                return
+            popover = Gtk.Popover()
+            popover.set_parent(anchor)
+            popover.set_autohide(False)
+            popover.set_position(Gtk.PositionType.TOP)
+            label = Gtk.Label(label=text)
+            label.add_css_class("copilot-flash")
+            popover.set_child(label)
+            popover.popup()
+
+            def dismiss():
+                popover.popdown()
+                popover.unparent()
+                return GLib.SOURCE_REMOVE
+
+            GLib.timeout_add(1100, dismiss)
+
+        def show_completion_menu(self):
+            pane = self._active_pane()
+            if pane is None or pane.kind != "terminal":
+                return
+            if not self.options.native_config.assistant.suggestions.menu:
+                return
+            journal = getattr(pane, "journal", None)
+            if journal is not None and journal.paused:
+                self._flash_pane(pane, "Copilot paused")
+                return
+            history = ([r.cmd for r in journal.snapshot() if r.cmd]
+                       if journal is not None else [])
+            if self._completion_popover is not None:
+                self._completion_popover.popdown()
+
+            popover = Gtk.Popover()
+            self._completion_popover = popover
+            popover.add_css_class("copilot-menu")
+            popover.set_parent(pane.terminal)
+            popover.set_position(Gtk.PositionType.BOTTOM)
+            popover.set_pointing_to(self._cursor_rect(pane.terminal))
+
+            entry = Gtk.SearchEntry()
+            entry.set_placeholder_text("Search commands and recipes…")
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_min_content_height(240)
+            scroller.set_min_content_width(420)
+            scroller.set_child(listbox)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.append(entry)
+            box.append(scroller)
+            popover.set_child(box)
+
+            def populate(query):
+                child = listbox.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    listbox.remove(child)
+                    child = nxt
+                for suggestion in copilot_suggest.build_suggestions(
+                        query, history=history):
+                    listbox.append(self._suggestion_row(suggestion))
+                first = listbox.get_row_at_index(0)
+                if first is not None:
+                    listbox.select_row(first)
+
+            def accept(row):
+                suggestion = getattr(row, "_suggestion", None)
+                if suggestion is None:
+                    return
+                popover.popdown()
+                self._accept_suggestion(pane, suggestion)
+
+            entry.connect("search-changed",
+                          lambda e: populate(e.get_text()))
+            entry.connect("activate",
+                          lambda e: accept(listbox.get_selected_row()))
+            listbox.connect("row-activated", lambda box, row: accept(row))
+
+            def on_closed(p):
+                p.unparent()
+                if self._completion_popover is p:
+                    self._completion_popover = None
+
+            popover.connect("closed", on_closed)
+            populate("")
+            popover.popup()
+            entry.grab_focus()
+
+        def _accept_suggestion(self, pane, suggestion, typed=""):
+            """Insert a chosen command; never with a trailing newline."""
+            clear, text = copilot_suggest.insert_plan(typed,
+                                                      suggestion.command)
+            if clear:
+                pane.insert_text("\x15")   # Ctrl-U: clear the input line
+            pane.insert_text(text)
+            pane.focus()
+
+        def _cursor_rect(self, terminal):
+            try:
+                col, row = terminal.get_cursor_position()
+                cw = terminal.get_char_width()
+                ch = terminal.get_char_height()
+                top = terminal.get_vadjustment().get_value()
+                rect = Gdk.Rectangle()
+                rect.x = int(col * cw)
+                rect.y = int((row - top) * ch)
+                rect.width = int(cw)
+                rect.height = int(ch)
+                return rect
+            except Exception:
+                rect = Gdk.Rectangle()
+                rect.x = rect.y = 0
+                rect.width = rect.height = 1
+                return rect
+
+        def _suggestion_row(self, suggestion):
+            row = Gtk.ListBoxRow()
+            row._suggestion = suggestion
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            inner.set_margin_top(4)
+            inner.set_margin_bottom(4)
+            inner.set_margin_start(8)
+            inner.set_margin_end(8)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            cmd = Gtk.Label(label=suggestion.command)
+            cmd.set_xalign(0.0)
+            cmd.set_hexpand(True)
+            cmd.set_ellipsize(Pango.EllipsizeMode.END)
+            cmd.add_css_class("copilot-cmd")
+            badge = Gtk.Label(label=suggestion.risk.display)
+            badge.add_css_class("risk-badge")
+            badge.add_css_class(f"risk-{suggestion.risk.display}")
+            top.append(cmd)
+            top.append(badge)
+            inner.append(top)
+            caption = suggestion.description or f"from {suggestion.label}"
+            desc = Gtk.Label(label=caption)
+            desc.set_xalign(0.0)
+            desc.add_css_class("copilot-desc")
+            inner.append(desc)
+            row.set_child(inner)
+            return row
 
         # -- session browser (copilot P1) -----------------------------------
 
