@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Launcher for the smart-ls directory browser.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+exec python3 -m agent_terminal.smart_ls "$@"

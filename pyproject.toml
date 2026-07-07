@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 agent-terminal-native = "agent_terminal.native_terminal:main"
+sls = "agent_terminal.smart_ls:main"
 
 [build-system]
 requires = ["setuptools>=68"]
