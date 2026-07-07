@@ -129,6 +129,25 @@ class OptionTests(unittest.TestCase):
         config = nt.load_native_config("/nonexistent/native.json")
         self.assertEqual(config, nt.NativeConfig())
 
+    def test_config_assistant_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "native.json"
+            config_path.write_text(json.dumps({
+                "assistant": {"shell_integration": False,
+                              "journal": {"max_commands": 12}},
+            }))
+            config = nt.load_native_config(config_path)
+            self.assertTrue(config.assistant.enabled)
+            self.assertFalse(config.assistant.shell_integration)
+            self.assertEqual(config.assistant.journal.max_commands, 12)
+        # defaults when the section is absent or malformed
+        self.assertTrue(nt.NativeConfig().assistant.enabled)
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "native.json"
+            config_path.write_text(json.dumps({"assistant": "bogus"}))
+            config = nt.load_native_config(config_path)
+            self.assertTrue(config.assistant.shell_integration)
+
     def test_control_socket_path_is_process_local(self):
         path = nt.default_control_socket_path(1234)
         self.assertIn("agent-terminal-native-1234.sock", path)

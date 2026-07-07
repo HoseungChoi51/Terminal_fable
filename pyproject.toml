@@ -19,4 +19,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agent_terminal"]
+packages = ["agent_terminal", "agent_terminal.copilot"]
+
+[tool.setuptools.package-data]
+"agent_terminal.copilot" = ["shell/*.bash"]

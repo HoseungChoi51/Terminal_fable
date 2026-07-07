@@ -24,9 +24,13 @@ import socket
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
+
+from agent_terminal.copilot import config as assistant_config
+from agent_terminal.copilot import journal as copilot_journal
+from agent_terminal.copilot import shellintegration as copilot_shell
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -188,6 +192,8 @@ class NativeConfig:
     pane_close_policy: str = DEFAULT_CLOSE_POLICY
     palette: str = DEFAULT_PALETTE
     pane_tints: bool = True
+    assistant: assistant_config.AssistantConfig = field(
+        default_factory=assistant_config.AssistantConfig)
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,8 @@ def load_native_config(path: str | os.PathLike | None = None) -> NativeConfig:
         pane_close_policy=policy,
         palette=normalize_palette(data.get("palette", DEFAULT_PALETTE)),
         pane_tints=bool(data.get("pane_tints", True)),
+        assistant=assistant_config.parse_assistant_config(
+            data.get("assistant")),
     )
 
 
@@ -1183,6 +1191,7 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
+    "copilot-debug",
     "shortcuts", "preferences", "quit",
 )
 
@@ -1449,6 +1458,15 @@ def build_native_classes(g):
     Graphene, Gsk = g.Graphene, g.Gsk
     Gtk, Pango, Vte = g.Gtk, g.Pango, g.Vte
 
+    # The shell snippet reports commands through this custom termprop;
+    # registration is process-global and must precede terminal creation.
+    try:
+        Vte.install_termprop(copilot_journal.COMMAND_TERMPROP,
+                             Vte.PropertyType.STRING,
+                             Vte.PropertyFlags.NONE)
+    except Exception:
+        pass
+
     def rgba(value):
         color = Gdk.RGBA()
         color.parse(value)
@@ -1574,12 +1592,17 @@ def build_native_classes(g):
 
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
-                     extra_env=None, on_exited=None, title=None, tint=0):
+                     extra_env=None, on_exited=None, title=None, tint=0,
+                     assistant=None):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
             self.settings = settings
             self.tint = normalize_tint(tint)
+            self.assistant = assistant
+            self.journal = None
+            self._termprop_events = []
+            self._termprop_flush_id = None
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1589,6 +1612,13 @@ def build_native_classes(g):
                                       self._on_title_signal)
             except TypeError:
                 pass
+            if assistant is not None and assistant.enabled:
+                self.journal = copilot_journal.PaneJournal(assistant.journal)
+                try:
+                    self.terminal.connect("termprop-changed",
+                                          self._on_termprop)
+                except TypeError:
+                    self.journal = None
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -1716,6 +1746,11 @@ def build_native_classes(g):
                 env[CONTROL_SOCKET_ENV] = control_socket_path
             if extra_env:
                 env.update(extra_env)
+            # Shell-integration rcfile injection; fails open to the
+            # original argv (see copilot/shellintegration.py).
+            argv = copilot_shell.wrap_argv(
+                argv, env, self.assistant,
+                explicit_command=command is not None)
             envv = [f"{key}={value}" for key, value in env.items()]
             cwd = working_directory or os.getcwd()
             try:
@@ -1759,6 +1794,62 @@ def build_native_classes(g):
             except Exception:
                 pass
             return None
+
+        # -- command journal (copilot P0) --------------------------------
+
+        def _on_termprop(self, terminal, name):
+            """Collect one termprop event; flush the burst from idle.
+
+            VTE coalesces an output burst into one batch whose signal
+            order is not the emission order, so events are gathered
+            here and handed to the journal in one apply_batch call.
+            """
+            if self.journal is None:
+                return
+            if name == copilot_journal.POSTEXEC:
+                try:
+                    ok, value = terminal.get_termprop_uint(name)
+                except Exception:
+                    ok, value = False, None
+                value = int(value) if ok else None
+            elif name == copilot_journal.COMMAND_TERMPROP:
+                try:
+                    result = terminal.get_termprop_string(name)
+                except Exception:
+                    result = None
+                value = result[0] if result else None
+            elif name in (copilot_journal.PRECMD, copilot_journal.PREEXEC):
+                value = None
+            else:
+                return
+            self._termprop_events.append((name, value))
+            if self._termprop_flush_id is None:
+                self._termprop_flush_id = GLib.idle_add(
+                    self._flush_termprop_batch)
+
+        def _flush_termprop_batch(self):
+            self._termprop_flush_id = None
+            events, self._termprop_events = self._termprop_events, []
+            if self.journal is not None and events:
+                try:
+                    row = self.terminal.get_cursor_position()[1]
+                except Exception:
+                    row = None
+                self.journal.apply_batch(
+                    events, timestamp=time.monotonic(),
+                    wall_time=time.time(), cwd=self.current_directory(),
+                    cursor_row=row, read_rows=self._read_rows)
+            return GLib.SOURCE_REMOVE
+
+        def _read_rows(self, start_row, end_row):
+            try:
+                text = self.terminal.get_text_range_format(
+                    Vte.Format.TEXT, start_row, 0, end_row, 0)
+            except Exception:
+                return None
+            if not text or not text[0]:
+                return None
+            return text[0].rstrip("\n").split("\n")
 
         def _feed_message(self, message):
             data = f"\r\n[{message}]\r\n".encode("utf-8")
@@ -2737,6 +2828,7 @@ def build_native_classes(g):
             view.append("Clear Scrollback", "win.clear-scrollback")
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
+            view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
             meta = Gio.Menu()
             meta.append("Keyboard Shortcuts", "win.shortcuts")
@@ -2798,7 +2890,8 @@ def build_native_classes(g):
                 hold_on_exit=hold_on_exit,
                 control_socket_path=self._app.control_socket_path,
                 on_exited=self._on_pane_exited, title=title,
-                tint=self._next_tint_slot())
+                tint=self._next_tint_slot(),
+                assistant=self.options.native_config.assistant)
 
         def _next_tint_slot(self):
             """Rotate through the tint ring so adjacent panes differ."""
@@ -3200,10 +3293,27 @@ def build_native_classes(g):
                 self._route("zoom_out")
             elif name == "zoom-reset":
                 self._route("zoom_reset")
+            elif name == "copilot-debug":
+                self.show_copilot_journal()
             elif name == "shortcuts":
                 self.show_shortcuts()
             elif name == "preferences":
                 self.show_preferences()
+
+        def show_copilot_journal(self):
+            """Dump the active pane's command journal into a viewer pane."""
+            pane = self._active_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return
+            directory = Path(copilot_shell.default_wrapper_dir())
+            path = directory / f"journal-{pane.pane_id}.md"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path.write_text(journal.to_markdown(), encoding="utf-8")
+            except OSError:
+                return
+            self.open_path(str(path))
 
     class NativeTerminalApplication(Gtk.Application):
         def __init__(self, options):
