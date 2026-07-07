@@ -11,6 +11,9 @@ trying to do.
 - **[native-terminal-mvp.md](native-terminal-mvp.md)** — usage guide: how to run
   it, the keyboard shortcuts, the GNOME-Terminal comparison checklist, and
   troubleshooting.
+- **[smart-ls.md](smart-ls.md)** — the `sls` full-screen directory browser:
+  ls-style keys, smart name truncation, cd-on-exit, opening files in viewer
+  panes.
 - **[../README.md](../README.md)** — project overview, requirements, install, and
   options at a glance.
 
@@ -44,6 +47,7 @@ trying to do.
 docs/
   README.md                     ← you are here (documentation index)
   native-terminal-mvp.md        usage guide & shortcuts
+  smart-ls.md                   the sls full-screen directory browser
   architecture.md               design & architecture overview
   developer-guide.md            setup, running, testing, conventions, workflow
   extending.md                  cookbook recipes for adding features
@@ -52,4 +56,5 @@ docs/
     0001-…-vte.md               delegate terminal emulation to VTE
     0002-custom-layout-widget.md  custom pane container, not Gtk.Paned
     0003-pure-gtk-free-core.md  keep logic in a GTK-free, testable core
+    0004-shared-tui-core-and-smart-ls.md  one TUI core, sls as a subprocess
 ```

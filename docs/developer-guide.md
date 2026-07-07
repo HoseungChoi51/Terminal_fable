@@ -70,7 +70,10 @@ remove, focus, resize, balance, swap, move, boundary hit-test, focused-fit, pixe
 minimums), Markdown/image helpers, action names, and shortcut contracts. It also
 contains **source guardrails** that assert architectural rules (see below).
 `tests/test_tui_navigation.py` covers the curses picker and the control-socket
-payload shape.
+payload shape. `tests/test_tui_core.py` covers the shared entry model and
+directory scanner, and `tests/test_smart_ls.py` covers the smart-ls pure core
+(truncation math, grid geometry, sorting, formatting, state transitions, the
+open plan).
 
 Run the unit tests before every commit. They are fast and need no GUI.
 
