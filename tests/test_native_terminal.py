@@ -590,6 +590,7 @@ class ActionTests(unittest.TestCase):
         "copy", "paste", "select-all", "find", "find-next", "find-previous",
         "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
+        "copilot-sessions", "copilot-debug",
         "shortcuts", "preferences", "quit",
     )
 
@@ -615,6 +616,15 @@ class ActionTests(unittest.TestCase):
         self.assertIn("<Ctrl><Shift>v", nt.ACCELERATORS["paste"])
         self.assertIn("<Ctrl><Shift>f", nt.ACCELERATORS["find"])
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
+        self.assertIn("<Ctrl><Shift>s", nt.ACCELERATORS["copilot-sessions"])
+
+    def test_copilot_session_shortcut_is_unique(self):
+        seen = {}
+        for action, accels in nt.ACCELERATORS.items():
+            for accel in accels:
+                self.assertNotIn(accel, seen,
+                                 f"{accel} on {action} and {seen.get(accel)}")
+                seen[accel] = action
         self.assertIn("<Ctrl><Shift>h", nt.ACCELERATORS["shortcuts"])
         self.assertIn("F1", nt.ACCELERATORS["shortcuts"])
 

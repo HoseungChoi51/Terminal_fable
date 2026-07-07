@@ -30,7 +30,9 @@ from types import SimpleNamespace
 
 from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
+from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
+from agent_terminal.copilot import titles as copilot_titles
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -1191,7 +1193,7 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-debug",
+    "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "quit",
 )
 
@@ -1230,6 +1232,7 @@ ACCELERATORS = {
     "zoom-in": ("<Ctrl>plus", "<Ctrl>equal"),
     "zoom-out": ("<Ctrl>minus",),
     "zoom-reset": ("<Ctrl>0",),
+    "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1", "<Ctrl>question"),
     "preferences": ("<Ctrl>comma",),
     "quit": ("<Ctrl><Shift>q",),
@@ -1422,6 +1425,8 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
                  padding: 2px 12px; border-radius: 0 0 8px 8px; }
 """
 
+SESSION_CHECKPOINT_SECONDS = 60
+
 _pane_ids = itertools.count(1)
 
 
@@ -1556,6 +1561,9 @@ def build_native_classes(g):
         def show_shortcut_hint(self):
             pass
 
+        def insert_text(self, text):
+            pass
+
     class ShortcutHintMixin:
         """Quiet top-of-pane notice pointing at the shortcut guide."""
 
@@ -1602,7 +1610,9 @@ def build_native_classes(g):
             self.assistant = assistant
             self.journal = None
             self._termprop_events = []
-            self._termprop_flush_id = None
+            self._flush_id = None
+            self._pending_title = None
+            self._title_policy = None
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1619,6 +1629,9 @@ def build_native_classes(g):
                                           self._on_termprop)
                 except TypeError:
                     self.journal = None
+                if self.journal is not None and assistant.titles.enabled:
+                    self._title_policy = copilot_titles.TitlePolicy(
+                        assistant.titles.min_interval_s)
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -1823,22 +1836,37 @@ def build_native_classes(g):
             else:
                 return
             self._termprop_events.append((name, value))
-            if self._termprop_flush_id is None:
-                self._termprop_flush_id = GLib.idle_add(
-                    self._flush_termprop_batch)
+            self._schedule_flush()
 
-        def _flush_termprop_batch(self):
-            self._termprop_flush_id = None
+        def _schedule_flush(self):
+            if self._flush_id is None:
+                self._flush_id = GLib.idle_add(self._flush_pending)
+
+        def _flush_pending(self):
+            self._flush_id = None
             events, self._termprop_events = self._termprop_events, []
             if self.journal is not None and events:
                 try:
                     row = self.terminal.get_cursor_position()[1]
                 except Exception:
                     row = None
+                before = len(self.journal.records)
                 self.journal.apply_batch(
                     events, timestamp=time.monotonic(),
                     wall_time=time.time(), cwd=self.current_directory(),
                     cursor_row=row, read_rows=self._read_rows)
+                if len(self.journal.records) != before:
+                    self._maybe_update_title()
+            # Resolve a deferred title now that journal state is current
+            # (see _on_title_signal): a title set while a command runs is
+            # a program title and wins; one set at the prompt is shell
+            # boilerplate and is ignored so the inferred title stands.
+            if self._pending_title is not None:
+                title, self._pending_title = self._pending_title, None
+                if (title and self.journal is not None
+                        and self.journal.state == "executing"):
+                    self.title = title
+                    self._notify_title()
             return GLib.SOURCE_REMOVE
 
         def _read_rows(self, start_row, end_row):
@@ -1850,6 +1878,26 @@ def build_native_classes(g):
             if not text or not text[0]:
                 return None
             return text[0].rstrip("\n").split("\n")
+
+        def insert_text(self, text):
+            """Type text into the child without running it (no newline)."""
+            if not text:
+                return
+            try:
+                self.terminal.feed_child(text.encode("utf-8"))
+            except TypeError:
+                data = text.encode("utf-8")
+                self.terminal.feed_child(data, len(data))
+
+        def build_session(self, config, now):
+            """Build a storable session from this pane's journal, or None."""
+            if self.journal is None:
+                return None
+            records = self.journal.snapshot()
+            if not records:
+                return None
+            return copilot_sessions.build_session(
+                records, config=config, now=now)
 
         def _feed_message(self, message):
             data = f"\r\n[{message}]\r\n".encode("utf-8")
@@ -1866,8 +1914,27 @@ def build_native_classes(g):
                 self.on_exited(self)
 
         def _on_title_signal(self, terminal):
-            self.title = terminal.get_window_title() or "Terminal"
+            vte_title = terminal.get_window_title() or ""
+            if self._title_policy is not None:
+                # The copilot owns the tab title. Defer the decision to
+                # the idle flush so it sees the journal state *after* the
+                # accompanying precmd batch is applied — resolving it here
+                # would race that batch and misread prompt boilerplate as
+                # a program title. Resolution lives in _flush_pending.
+                self._pending_title = vte_title
+                self._schedule_flush()
+                return
+            self.title = vte_title or "Terminal"
             self._notify_title()
+
+        def _maybe_update_title(self):
+            if self._title_policy is None or self.journal is None:
+                return
+            candidate = copilot_titles.infer_title(
+                self.journal.snapshot(), self.current_directory())
+            if self._title_policy.propose(candidate, time.monotonic()):
+                self.title = self._title_policy.current
+                self._notify_title()
 
         def apply_tint(self):
             """Set VTE colours, overriding only the background for this pane."""
@@ -2525,6 +2592,7 @@ def build_native_classes(g):
             pane = self.panes.pop(pane_id, None)
             if pane is None:
                 return
+            self.window.flush_pane_session(pane)
             self.push_history()
             self.fit_focused_root = None
             self.root = layout_remove_leaf(self.root, pane_id,
@@ -2803,7 +2871,21 @@ def build_native_classes(g):
             dead_keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
             dead_keys.connect("key-pressed", self._on_dead_key)
             self.add_controller(dead_keys)
+            self._session_checkpoint_id = None
+            if self._app.session_store is not None:
+                # Periodic checkpoint so a crash or kill still leaves a
+                # session on disk; normal closes flush eagerly below.
+                self._session_checkpoint_id = GLib.timeout_add_seconds(
+                    SESSION_CHECKPOINT_SECONDS, self._checkpoint_sessions)
+                self.connect("close-request", self._on_close_request)
             self._open_initial_tabs()
+
+        def _on_close_request(self, *args):
+            self.flush_all_sessions()
+            if self._session_checkpoint_id is not None:
+                GLib.source_remove(self._session_checkpoint_id)
+                self._session_checkpoint_id = None
+            return False
 
         def _build_header(self):
             header = Gtk.HeaderBar()
@@ -2828,6 +2910,7 @@ def build_native_classes(g):
             view.append("Clear Scrollback", "win.clear-scrollback")
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
+            view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
             meta = Gio.Menu()
@@ -2972,6 +3055,43 @@ def build_native_classes(g):
                 return getter()
             except Exception:
                 return None
+
+        # -- sessions (copilot P1) ------------------------------------------
+
+        def flush_pane_session(self, pane):
+            """Persist one terminal pane's journal as a session, if worthy."""
+            store = self._app.session_store
+            builder = getattr(pane, "build_session", None)
+            if store is None or builder is None:
+                return
+            try:
+                session = builder(
+                    self.options.native_config.assistant.sessions, time.time())
+            except Exception:
+                return
+            if session is not None:
+                store.save(session)
+
+        def flush_all_sessions(self):
+            for tab in self.tabs:
+                for pane in tab.panes.values():
+                    self.flush_pane_session(pane)
+
+        def _checkpoint_sessions(self):
+            self.flush_all_sessions()
+            return GLib.SOURCE_CONTINUE
+
+        def insert_into_active_terminal(self, text):
+            """Type text (no newline) into the focused terminal pane."""
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is not None and pane.kind == "terminal":
+                pane.insert_text(text)
+            elif tab is not None:
+                tab.focus_recent_terminal()
+                active = tab.active_pane()
+                if active is not None and active.kind == "terminal":
+                    active.insert_text(text)
 
         def remove_tab(self, tab):
             if tab not in self.tabs:
@@ -3295,6 +3415,8 @@ def build_native_classes(g):
                 self._route("zoom_reset")
             elif name == "copilot-debug":
                 self.show_copilot_journal()
+            elif name == "copilot-sessions":
+                self.show_sessions()
             elif name == "shortcuts":
                 self.show_shortcuts()
             elif name == "preferences":
@@ -3315,6 +3437,98 @@ def build_native_classes(g):
                 return
             self.open_path(str(path))
 
+        # -- session browser (copilot P1) -----------------------------------
+
+        def show_sessions(self):
+            store = self._app.session_store
+            if store is None:
+                return
+            # Flush current panes first so the just-worked session is listed.
+            self.flush_all_sessions()
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Session History")
+            dialog.set_default_size(560, 620)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+            sessions = store.list()
+            for summary in sessions:
+                listbox.append(self._session_row(summary))
+            if not sessions:
+                empty = Gtk.Label(label="No saved sessions yet.")
+                empty.set_margin_top(24)
+                listbox.append(empty)
+            listbox.connect(
+                "row-activated",
+                lambda box, row: self._restore_session(dialog, row))
+            scroller.set_child(listbox)
+            restore = Gtk.Button(label="Restore")
+            restore.connect("clicked", lambda *_: self._restore_session(
+                dialog, listbox.get_selected_row()))
+            insert = Gtk.Button(label="Insert last command")
+            insert.connect("clicked", lambda *_: self._insert_session_command(
+                dialog, listbox.get_selected_row()))
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: dialog.close())
+            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            buttons.set_halign(Gtk.Align.END)
+            buttons.append(insert)
+            buttons.append(restore)
+            buttons.append(close)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(8)
+            box.set_margin_end(8)
+            box.append(scroller)
+            box.append(buttons)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        def _session_row(self, summary):
+            row = Gtk.ListBoxRow()
+            row._session = summary
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            inner.set_margin_top(6)
+            inner.set_margin_bottom(6)
+            inner.set_margin_start(10)
+            inner.set_margin_end(10)
+            title = Gtk.Label(label=summary.title)
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            meta = f"{summary.cwd_last or '?'} · {summary.command_count} cmds"
+            subtitle = Gtk.Label(label=meta)
+            subtitle.set_xalign(0.0)
+            subtitle.add_css_class("dim-label")
+            inner.append(title)
+            inner.append(subtitle)
+            row.set_child(inner)
+            return row
+
+        def _restore_session(self, dialog, row):
+            summary = getattr(row, "_session", None)
+            if summary is None:
+                return
+            store = self._app.session_store
+            cwd = summary.cwd_last if summary.cwd_last and os.path.isdir(
+                summary.cwd_last) else None
+            self.add_terminal_tab(working_directory=cwd)
+            summary_path = store.summary_path(summary.id)
+            if os.path.isfile(summary_path):
+                self.open_path(summary_path)
+            dialog.close()
+
+        def _insert_session_command(self, dialog, row):
+            summary = getattr(row, "_session", None)
+            if summary is None or not summary.last_command:
+                return
+            dialog.close()
+            self.insert_into_active_terminal(summary.last_command)
+
     class NativeTerminalApplication(Gtk.Application):
         def __init__(self, options):
             super().__init__(application_id=APP_ID,
@@ -3323,6 +3537,19 @@ def build_native_classes(g):
             self.control_socket_path = (options.control_socket_path
                                         or default_control_socket_path())
             self._socket_server = None
+            self.session_store = self._make_session_store()
+
+        def _make_session_store(self):
+            assistant = self.options.native_config.assistant
+            if not (assistant.enabled and assistant.sessions.enabled):
+                return None
+            try:
+                store = copilot_sessions.SessionStore(
+                    copilot_sessions.default_base_dir())
+                store.sweep(assistant.sessions.retention_days, time.time())
+                return store
+            except Exception:
+                return None
 
         def do_startup(self):
             Gtk.Application.do_startup(self)
@@ -3345,6 +3572,9 @@ def build_native_classes(g):
             window.present()
 
         def do_shutdown(self):
+            for window in list(self.get_windows() or []):
+                if isinstance(window, NativeTerminalWindow):
+                    window.flush_all_sessions()
             if self._socket_server is not None:
                 self._socket_server.close()
                 self._socket_server = None
