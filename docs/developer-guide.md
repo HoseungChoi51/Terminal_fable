@@ -73,7 +73,9 @@ contains **source guardrails** that assert architectural rules (see below).
 payload shape. `tests/test_tui_core.py` covers the shared entry model and
 directory scanner, and `tests/test_smart_ls.py` covers the smart-ls pure core
 (truncation math, grid geometry, sorting, formatting, state transitions, the
-open plan).
+open plan). `tests/test_copilot_core.py` covers the copilot pure core (assistant
+config parsing, secret redaction, the command journal state machine, and the
+shell-integration wrap-argv decision + snippet guardrails).
 
 Run the unit tests before every commit. They are fast and need no GUI.
 

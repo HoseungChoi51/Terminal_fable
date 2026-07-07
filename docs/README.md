@@ -14,6 +14,8 @@ trying to do.
 - **[smart-ls.md](smart-ls.md)** — the `sls` full-screen directory browser:
   ls-style keys, smart name truncation, cd-on-exit, opening files in viewer
   panes.
+- **[copilot.md](copilot.md)** — the context-aware terminal copilot: what has
+  shipped, shell integration, privacy, and configuration.
 - **[../README.md](../README.md)** — project overview, requirements, install, and
   options at a glance.
 
@@ -57,6 +59,7 @@ docs/
   README.md                     ← you are here (documentation index)
   native-terminal-mvp.md        usage guide & shortcuts
   smart-ls.md                   the sls full-screen directory browser
+  copilot.md                    the context-aware terminal copilot
   architecture.md               design & architecture overview
   developer-guide.md            setup, running, testing, conventions, workflow
   extending.md                  cookbook recipes for adding features
@@ -66,4 +69,7 @@ docs/
     0002-custom-layout-widget.md  custom pane container, not Gtk.Paned
     0003-pure-gtk-free-core.md  keep logic in a GTK-free, testable core
     0004-shared-tui-core-and-smart-ls.md  one TUI core, sls as a subprocess
+    0005-copilot-pure-core-package.md     copilot package + one-way imports
+    0006-overlay-ghost-text-no-engine-replacement.md  overlay ghost text
+    0007-bash-shell-integration.md        auto-injected rcfile + termprops
 ```

@@ -92,6 +92,14 @@ directory scanning/listing, and the client side of the control protocol
 ([smart-ls.md](smart-ls.md)), which talks back to the app only through the
 control socket.
 
+The `agent_terminal/copilot/` package holds the terminal copilot's pure core
+(config, redaction, the per-pane command journal, shell-integration decisions;
+[copilot.md](copilot.md)). It is GTK-free and follows a one-way import rule —
+`native_terminal` imports `copilot.*`, never the reverse (ADR
+[0005](decisions/0005-copilot-pure-core-package.md)). The GTK module contributes
+only thin wiring: an `assistant` config section, rcfile injection at spawn, and
+the termprop signal handler that feeds the journal.
+
 ## The layout engine (pure)
 
 Pane geometry is modeled as an **immutable n-ary split tree** and all operations
