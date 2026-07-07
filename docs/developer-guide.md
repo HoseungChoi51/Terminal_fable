@@ -76,6 +76,9 @@ directory scanner, and `tests/test_smart_ls.py` covers the smart-ls pure core
 open plan). `tests/test_copilot_core.py` covers the copilot pure core (assistant
 config parsing, secret redaction, the command journal state machine, and the
 shell-integration wrap-argv decision + snippet guardrails).
+`tests/test_copilot_sessions.py` covers the P1 core (title inference and
+damping, session meaningfulness, exclusions, the heuristic summary, and the
+on-disk session store round-trip, listing, and retention sweep).
 
 Run the unit tests before every commit. They are fast and need no GUI.
 

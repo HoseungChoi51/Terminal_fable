@@ -20,9 +20,25 @@ journal is the substrate later phases build titles, sessions,
 suggestions, and summaries on. Inspect it with **View → Copilot Journal
 (Debug)**, which dumps the active pane's journal into a markdown pane.
 
-Later phases (titles, session history, completion menu, context
-suggestions, ghost text, the LLM intent panel) are described in the
-development plan.
+**Phase P1 — titles and session history (shipped).** Two features
+built on the journal:
+
+- *Auto tab titles.* Each tab names itself `project: command` — the
+  working directory's basename plus a short summary of the most recent
+  meaningful command (for example `terminal-fable: pytest`). Titles are
+  damped so they never flicker, and a title set by a running program
+  (vim, ssh, htop) wins while that program is in the foreground.
+- *Session history.* When a meaningful session ends (roughly: three or
+  more non-trivial commands, or one that ran a while), it is saved to
+  disk. Press **Ctrl+Shift+S** — or **View → Session History…** — to
+  browse past sessions. *Restore* opens a new tab in the session's last
+  directory alongside a markdown summary of what you did; *Insert last
+  command* types that session's last command into the current terminal
+  (without running it). A trivial session (a couple of `ls`es and an
+  `exit`) is not stored.
+
+Later phases (completion menu, context suggestions, ghost text, the LLM
+intent panel) are described in the development plan.
 
 ## How command tracking works
 
@@ -71,7 +87,10 @@ missing or invalid values fall back to the defaults shown here:
   "assistant": {
     "enabled": true,
     "shell_integration": true,
-    "journal": {"max_commands": 200, "store_output": true, "output_tail_lines": 20}
+    "journal": {"max_commands": 200, "store_output": true, "output_tail_lines": 20},
+    "titles": {"enabled": true, "min_interval_s": 30},
+    "sessions": {"enabled": true, "retention_days": 30,
+                 "exclude_dirs": [], "exclude_commands": [], "store_output": true}
   }
 }
 ```
@@ -81,7 +100,16 @@ missing or invalid values fall back to the defaults shown here:
 - `journal.max_commands` — ring size of remembered commands per pane.
 - `journal.store_output` — whether to keep the redacted output tail.
 - `journal.output_tail_lines` — how many trailing output lines to keep.
+- `titles.enabled` — infer tab titles from the journal.
+- `titles.min_interval_s` — minimum seconds between title changes (anti-flicker).
+- `sessions.enabled` — save and browse session history.
+- `sessions.retention_days` — delete stored sessions older than this.
+- `sessions.exclude_dirs` — directories whose sessions are never saved.
+- `sessions.exclude_commands` — glob patterns whose commands are dropped before saving.
+- `sessions.store_output` — whether saved sessions keep command output.
 
-Additional sections (`titles`, `sessions`, `suggestions`, `recipes`,
-`llm`, `resume`) are parsed and reserved for later phases; see the
-development plan for their meaning.
+Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
+(see ADR [0009](decisions/0009-session-persistence-format.md)); every
+stored command is redacted, and nothing leaves your machine. The
+remaining sections (`suggestions`, `recipes`, `llm`, `resume`) are
+parsed and reserved for later phases.
