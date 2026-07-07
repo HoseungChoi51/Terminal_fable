@@ -8,6 +8,7 @@ and the control-socket client. Consumed by the file picker
 from __future__ import annotations
 
 import json
+import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,48 @@ class PickerEntry:
     name: str
     path: str
     is_dir: bool
+    size: int | None = None
+    mtime: float | None = None
+    mode: int | None = None
+
+
+def scan_directory(path, *, show_hidden=False, with_stat=False):
+    """Raw directory entries: names verbatim, unsorted, no ".." entry.
+
+    With with_stat, entries carry size/mtime/mode; a broken symlink
+    falls back to its own lstat, and stat failure leaves them None.
+    An unreadable directory yields an empty list.
+    """
+    try:
+        with os.scandir(str(path)) as children:
+            listed = list(children)
+    except OSError:
+        return []
+    entries: list[PickerEntry] = []
+    for child in listed:
+        name = child.name
+        if not show_hidden and name.startswith("."):
+            continue
+        try:
+            is_dir = child.is_dir(follow_symlinks=True)
+        except OSError:
+            is_dir = False
+        size = mtime = mode = None
+        if with_stat:
+            try:
+                result = child.stat(follow_symlinks=True)
+            except OSError:
+                try:
+                    result = child.stat(follow_symlinks=False)
+                except OSError:
+                    result = None
+            if result is not None:
+                size = result.st_size
+                mtime = result.st_mtime
+                mode = result.st_mode
+        entries.append(PickerEntry(name, child.path, is_dir,
+                                   size=size, mtime=mtime, mode=mode))
+    return entries
 
 
 def list_directory(path, *, show_hidden=False, extensions=(), query=""):
@@ -30,25 +73,19 @@ def list_directory(path, *, show_hidden=False, extensions=(), query=""):
     entries: list[PickerEntry] = []
     if base.parent != base:
         entries.append(PickerEntry("..", str(base.parent), True))
-    try:
-        children = list(base.iterdir())
-    except OSError:
-        children = []
     needle = query.casefold()
     directories = []
     files = []
-    for child in children:
+    for child in scan_directory(base, show_hidden=show_hidden):
         name = child.name
-        if not show_hidden and name.startswith("."):
-            continue
         if needle and needle not in name.casefold():
             continue
-        if child.is_dir():
-            directories.append(PickerEntry(name + "/", str(child), True))
+        if child.is_dir:
+            directories.append(PickerEntry(name + "/", child.path, True))
         else:
             if extensions and not name.lower().endswith(extensions):
                 continue
-            files.append(PickerEntry(name, str(child), False))
+            files.append(child)
     directories.sort(key=lambda entry: entry.name.casefold())
     files.sort(key=lambda entry: entry.name.casefold())
     entries.extend(directories)
