@@ -37,8 +37,22 @@ built on the journal:
   (without running it). A trivial session (a couple of `ls`es and an
   `exit`) is not stored.
 
-Later phases (completion menu, context suggestions, ghost text, the LLM
-intent panel) are described in the development plan.
+**Phase P2 — command menu (shipped).** Press **Ctrl+Shift+Space** to
+open a command menu at the cursor: a searchable, ranked list of
+built-in recipes and commands from your own history, each tagged with a
+**risk badge** (read-only, local-change, install, remote, privileged,
+destructive). Type to filter; press Enter or click to insert the chosen
+command onto your prompt. Insertion **never runs anything** — it clears
+the current input line and types the command in, leaving you to press
+Enter yourself. **Alt+Shift+A** pauses the copilot for the current pane
+(stops journaling and hides the menu); press it again to resume.
+
+Recipes cover the common needs — "sort by size", "kill process on
+port", "unzip all files", "split video into frames", git/docker/kubectl
+workflows — with `<placeholder>` slots you fill in before running.
+
+Later phases (context-aware suggestions, ghost text, the LLM intent
+panel) are described in the development plan.
 
 ## How command tracking works
 
@@ -90,7 +104,9 @@ missing or invalid values fall back to the defaults shown here:
     "journal": {"max_commands": 200, "store_output": true, "output_tail_lines": 20},
     "titles": {"enabled": true, "min_interval_s": 30},
     "sessions": {"enabled": true, "retention_days": 30,
-                 "exclude_dirs": [], "exclude_commands": [], "store_output": true}
+                 "exclude_dirs": [], "exclude_commands": [], "store_output": true},
+    "suggestions": {"menu": true},
+    "recipes": {"enabled": true}
   }
 }
 ```
@@ -100,6 +116,8 @@ missing or invalid values fall back to the defaults shown here:
 - `journal.max_commands` — ring size of remembered commands per pane.
 - `journal.store_output` — whether to keep the redacted output tail.
 - `journal.output_tail_lines` — how many trailing output lines to keep.
+- `suggestions.menu` — enable the Ctrl+Shift+Space command menu.
+- `recipes.enabled` — include built-in recipes in the menu.
 - `titles.enabled` — infer tab titles from the journal.
 - `titles.min_interval_s` — minimum seconds between title changes (anti-flicker).
 - `sessions.enabled` — save and browse session history.

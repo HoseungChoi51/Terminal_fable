@@ -79,6 +79,9 @@ shell-integration wrap-argv decision + snippet guardrails).
 `tests/test_copilot_sessions.py` covers the P1 core (title inference and
 damping, session meaningfulness, exclusions, the heuristic summary, and the
 on-disk session store round-trip, listing, and retention sweep).
+`tests/test_copilot_suggest.py` covers the P2 core (fuzzy scoring, the risk
+classifier against the design-doc examples, recipe metadata and search, and the
+suggestion merge/rank/insert-plan logic).
 
 Run the unit tests before every commit. They are fast and need no GUI.
 

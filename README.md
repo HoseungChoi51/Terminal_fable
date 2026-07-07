@@ -91,7 +91,9 @@ Alt+Shift+F       temporary focus fit
 Alt+Shift+Space   pane control mode
 Ctrl+Shift+C/V    copy / paste
 Ctrl+Shift+F      find
+Ctrl+Shift+Space  command menu (copilot)
 Ctrl+Shift+S      session history (copilot)
+Alt+Shift+A       pause/resume copilot (active pane)
 F5                reload viewer
 F / 1             image fit / actual size
 Esc               viewer → input back to terminal
