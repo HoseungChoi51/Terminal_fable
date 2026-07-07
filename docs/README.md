@@ -41,6 +41,15 @@ trying to do.
 - **[../native-terminal-reproducible-development-plan.md](../native-terminal-reproducible-development-plan.md)**
   — the phased plan and architecture map for reproducing the terminal from zero.
 
+### …build the terminal copilot
+
+- **[../AI_Integration_design.md](../AI_Integration_design.md)** — product
+  requirements for the context-aware terminal copilot (behavior spec, no
+  implementation details).
+- **[../copilot-development-plan.md](../copilot-development-plan.md)** — the
+  phased implementation roadmap adapting that spec to this codebase (module
+  layout, config schema, risk register, ADR list).
+
 ## Map
 
 ```

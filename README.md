@@ -20,6 +20,9 @@ Full documentation lives in [`docs/`](docs/README.md):
 - [Developer guide](docs/developer-guide.md) — setup, tests, conventions, commit/release workflow.
 - [Extending](docs/extending.md) — recipes for adding actions, pane types, palettes, config, and layout ops.
 - [Decisions](docs/decisions/README.md) — ADRs explaining the major design choices.
+- [Copilot development plan](copilot-development-plan.md) — phased roadmap for the
+  context-aware terminal copilot specified in
+  [`AI_Integration_design.md`](AI_Integration_design.md).
 
 ## Requirements
 
