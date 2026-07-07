@@ -98,7 +98,10 @@ your shell stays where it was.
 - **Anywhere else** — or for any other file type — the file opens with
   a detached `xdg-open`.
 
-Browsing continues either way; `sls` is a browser, not a picker.
+`sls` keeps running either way — it is a browser, not a picker. Inside
+Terminal Fable the new viewer pane takes keyboard focus (so you can
+scroll and zoom it immediately); press `Esc` there to hand input back
+to the terminal and continue browsing.
 
 ## Limitations
 

@@ -1331,7 +1331,7 @@ class ControlSocketServer:
 # Shortcut hint
 # ---------------------------------------------------------------------------
 
-SHORTCUT_HINT_TEXT = "Ctrl+Shift+H — shortcut help"
+SHORTCUT_HINT_TEXT = "Esc — back to terminal · Ctrl+Shift+H — shortcut help"
 SHORTCUT_HINT_THRESHOLD = 3
 SHORTCUT_HINT_MAX_GAP = 3.0
 SHORTCUT_HINT_HIDE_SECONDS = 6
@@ -1873,6 +1873,11 @@ def build_native_classes(g):
             if self.on_activated:
                 self.on_activated(self)
 
+        def focus(self):
+            # The focusable widget is the scroller (arrow/page keys
+            # scroll it), not the overlay wrapper.
+            self._scroller.grab_focus()
+
         def reload(self):
             try:
                 text = Path(self.path).read_text(encoding="utf-8",
@@ -2098,6 +2103,9 @@ def build_native_classes(g):
             if self.on_activated:
                 self.on_activated(self)
 
+        def focus(self):
+            self._scroller.grab_focus()
+
         def reload(self):
             try:
                 self._pixbuf = GdkPixbuf.Pixbuf.new_from_file(self.path)
@@ -2319,12 +2327,15 @@ def build_native_classes(g):
             self.fit_focused_root = None
             self.undo_stack = []
             self.redo_stack = []
+            self._recent_terminal_id = None
             self.container = PaneLayoutContainer(self)
             self.widget = self.container.widget
             self.title = first_pane.title
             self._attach_pane(first_pane)
             self.root = layout_leaf(first_pane.pane_id)
             self.active_pane_id = first_pane.pane_id
+            if first_pane.kind == "terminal":
+                self._recent_terminal_id = first_pane.pane_id
             self._sync()
 
         def display_root(self):
@@ -2347,7 +2358,12 @@ def build_native_classes(g):
             pane.widget.add_controller(click)
 
         def _on_pane_pressed(self, gesture, n_press, x, y, pane_id):
-            self.set_active(pane_id)
+            # Viewers take keyboard focus on click so scroll/zoom keys
+            # (and Escape back to the terminal) work mouse-free;
+            # terminals keep VTE's own click-to-focus.
+            pane = self.panes.get(pane_id)
+            focus = pane is not None and pane.kind != "terminal"
+            self.set_active(pane_id, focus=focus)
 
         def _on_pane_title(self, pane):
             if pane.pane_id == self.active_pane_id:
@@ -2358,10 +2374,24 @@ def build_native_classes(g):
             if pane_id not in self.panes:
                 return
             self.active_pane_id = pane_id
+            if self.panes[pane_id].kind == "terminal":
+                self._recent_terminal_id = pane_id
             self.title = self.panes[pane_id].title
             self.window.update_tab_title(self)
             if focus:
                 self.panes[pane_id].focus()
+
+        def focus_recent_terminal(self):
+            """Return keyboard input to the last-used terminal pane."""
+            pane = self.panes.get(self._recent_terminal_id)
+            if pane is None or pane.kind != "terminal":
+                pane = next((self.panes[pane_id]
+                             for pane_id in layout_leaf_ids(self.root)
+                             if pane_id in self.panes
+                             and self.panes[pane_id].kind == "terminal"),
+                            None)
+            if pane is not None:
+                self.set_active(pane.pane_id, focus=True)
 
         def _sync(self):
             self.container.set_panes(
@@ -2392,7 +2422,9 @@ def build_native_classes(g):
                                               after=True)
             self.set_active(pane.pane_id)
             self._sync()
-            pane.focus()
+            # Deferred: grab_focus on a not-yet-mapped widget is a no-op,
+            # and the new pane only gets allocated on the next frame.
+            GLib.idle_add(pane.focus)
 
         def split(self, orientation):
             self.add_pane(self.window.create_terminal_pane(), orientation)
@@ -2959,7 +2991,13 @@ def build_native_classes(g):
             pane = self._active_pane()
             if pane is None or pane.kind == "terminal":
                 return False
-            if (Gdk.keyval_name(keyval) or "") in MODIFIER_KEYVAL_NAMES:
+            name = Gdk.keyval_name(keyval) or ""
+            if name == "Escape":
+                tab = self.active_tab()
+                if tab is not None:
+                    tab.focus_recent_terminal()
+                return True
+            if name in MODIFIER_KEYVAL_NAMES:
                 return False
             if pane.pane_id != self._hint_pane_id:
                 self._hint_pane_id = pane.pane_id

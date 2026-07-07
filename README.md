@@ -90,6 +90,7 @@ Ctrl+Shift+C/V    copy / paste
 Ctrl+Shift+F      find
 F5                reload viewer
 F / 1             image fit / actual size
+Esc               viewer → input back to terminal
 Ctrl+Shift+H, F1  shortcut guide
 ```
 

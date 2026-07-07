@@ -773,6 +773,7 @@ class ShortcutHintDetectorTests(unittest.TestCase):
 
     def test_hint_text_names_the_shortcut(self):
         self.assertIn("Ctrl+Shift+H", nt.SHORTCUT_HINT_TEXT)
+        self.assertIn("Esc", nt.SHORTCUT_HINT_TEXT)
 
 
 if __name__ == "__main__":
