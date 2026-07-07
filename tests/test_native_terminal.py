@@ -730,5 +730,50 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Terminal=false", desktop)
 
 
+class ShortcutHintDetectorTests(unittest.TestCase):
+    def test_below_threshold_stays_quiet(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        self.assertFalse(detector.record(1.0))
+        self.assertFalse(detector.record(1.5))
+
+    def test_quick_run_triggers(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertTrue(detector.record(2.0))
+
+    def test_pause_resets_the_count(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertFalse(detector.record(10.0))
+        self.assertFalse(detector.record(10.5))
+        self.assertTrue(detector.record(11.0))
+
+    def test_keeps_firing_while_fumbling_continues(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertTrue(detector.record(2.0))
+        self.assertTrue(detector.record(2.5))
+
+    def test_reset(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        detector.reset()
+        self.assertFalse(detector.record(2.0))
+
+    def test_modifier_keyvals_cover_plain_modifiers(self):
+        for name in ("Shift_L", "Control_R", "Alt_L", "Super_L",
+                     "Caps_Lock"):
+            self.assertIn(name, nt.MODIFIER_KEYVAL_NAMES)
+        self.assertNotIn("a", nt.MODIFIER_KEYVAL_NAMES)
+        self.assertNotIn("Escape", nt.MODIFIER_KEYVAL_NAMES)
+
+    def test_hint_text_names_the_shortcut(self):
+        self.assertIn("Ctrl+Shift+H", nt.SHORTCUT_HINT_TEXT)
+
+
 if __name__ == "__main__":
     unittest.main()

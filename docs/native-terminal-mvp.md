@@ -152,6 +152,12 @@ basic tables, links, inline code, bold, and italics.
   `file`).
 - Find re-renders with highlighted matches and scrolls to them.
 
+Both viewers show a quiet hint at the top of the pane
+(`Ctrl+Shift+H — shortcut help`) after a few quick keystrokes that
+nothing handled — the usual sign of hunting for a forgotten shortcut
+(e.g. how to close the pane: click it, then `Ctrl+Shift+W`). It fades
+out on its own and never consumes keys.
+
 ## Image viewer
 
 PNG, JPEG, GIF, and WebP through GdkPixbuf, rendered with

@@ -23,6 +23,7 @@ import shlex
 import socket
 import sys
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1327,6 +1328,52 @@ class ControlSocketServer:
 
 
 # ---------------------------------------------------------------------------
+# Shortcut hint
+# ---------------------------------------------------------------------------
+
+SHORTCUT_HINT_TEXT = "Ctrl+Shift+H — shortcut help"
+SHORTCUT_HINT_THRESHOLD = 3
+SHORTCUT_HINT_MAX_GAP = 3.0
+SHORTCUT_HINT_HIDE_SECONDS = 6
+
+# Key presses that are never "typing": bare modifiers and locks.
+MODIFIER_KEYVAL_NAMES = frozenset({
+    "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    "Super_L", "Super_R", "Meta_L", "Meta_R", "Hyper_L", "Hyper_R",
+    "ISO_Level3_Shift", "ISO_Level5_Shift", "Caps_Lock", "Num_Lock",
+})
+
+
+class ShortcutHintDetector:
+    """Guess when dead keystrokes mean "I'm hunting for a shortcut".
+
+    Fed only key presses that nothing in the window handled. A quick
+    run of them reads as someone trying keys from memory; a pause of
+    max_gap seconds reads as having moved on and resets the count.
+    From the threshold on, every further dead key returns True so the
+    hint stays fresh while the fumbling continues.
+    """
+
+    def __init__(self, threshold=SHORTCUT_HINT_THRESHOLD,
+                 max_gap=SHORTCUT_HINT_MAX_GAP):
+        self.threshold = threshold
+        self.max_gap = max_gap
+        self._count = 0
+        self._last = None
+
+    def record(self, timestamp) -> bool:
+        if self._last is not None and timestamp - self._last > self.max_gap:
+            self._count = 0
+        self._last = timestamp
+        self._count += 1
+        return self._count >= self.threshold
+
+    def reset(self):
+        self._count = 0
+        self._last = None
+
+
+# ---------------------------------------------------------------------------
 # GTK loading and native classes
 # ---------------------------------------------------------------------------
 
@@ -1360,6 +1407,10 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .image-status { padding: 4px 10px; }
 .pane-leader { background-color: #1c2128; color: #d8dee9; padding: 18px;
                border-radius: 10px; }
+/* Deliberately quiet: it may be a shortcut hunt or just idle typing. */
+.shortcut-hint { background-color: alpha(#1c2128, 0.85);
+                 color: alpha(#d8dee9, 0.7); font-size: 0.85em;
+                 padding: 2px 12px; border-radius: 0 0 8px 8px; }
 """
 
 _pane_ids = itertools.count(1)
@@ -1483,6 +1534,40 @@ def build_native_classes(g):
 
         def zoom_reset(self):
             pass
+
+        def show_shortcut_hint(self):
+            pass
+
+    class ShortcutHintMixin:
+        """Quiet top-of-pane notice pointing at the shortcut guide."""
+
+        def _wrap_with_hint(self, content):
+            label = Gtk.Label(label=SHORTCUT_HINT_TEXT)
+            label.add_css_class("shortcut-hint")
+            self._hint_revealer = Gtk.Revealer()
+            self._hint_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.CROSSFADE)
+            self._hint_revealer.set_halign(Gtk.Align.CENTER)
+            self._hint_revealer.set_valign(Gtk.Align.START)
+            self._hint_revealer.set_can_target(False)
+            self._hint_revealer.set_child(label)
+            self._hint_timeout = None
+            overlay = Gtk.Overlay()
+            overlay.set_child(content)
+            overlay.add_overlay(self._hint_revealer)
+            return overlay
+
+        def show_shortcut_hint(self):
+            self._hint_revealer.set_reveal_child(True)
+            if self._hint_timeout is not None:
+                GLib.source_remove(self._hint_timeout)
+            self._hint_timeout = GLib.timeout_add_seconds(
+                SHORTCUT_HINT_HIDE_SECONDS, self._hide_shortcut_hint)
+
+        def _hide_shortcut_hint(self):
+            self._hint_timeout = None
+            self._hint_revealer.set_reveal_child(False)
+            return GLib.SOURCE_REMOVE
 
     class TerminalPane(PaneBase):
         kind = "terminal"
@@ -1759,7 +1844,7 @@ def build_native_classes(g):
         def zoom_reset(self):
             self.terminal.set_font_scale(1.0)
 
-    class MarkdownPane(PaneBase):
+    class MarkdownPane(ShortcutHintMixin, PaneBase):
         """Passive native Markdown viewer rendered with GTK labels."""
 
         kind = "markdown"
@@ -1777,7 +1862,7 @@ def build_native_classes(g):
             self._scroller = Gtk.ScrolledWindow()
             self._scroller.set_hexpand(True)
             self._scroller.set_vexpand(True)
-            self.widget = self._scroller
+            self.widget = self._wrap_with_hint(self._scroller)
             click = Gtk.GestureClick()
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pressed)
@@ -1963,7 +2048,7 @@ def build_native_classes(g):
             self._zoom = 1.0
             self.reload()
 
-    class ImagePane(PaneBase):
+    class ImagePane(ShortcutHintMixin, PaneBase):
         """Native image viewer: GdkPixbuf loading with Gtk.Picture output."""
 
         kind = "image"
@@ -1991,7 +2076,7 @@ def build_native_classes(g):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             box.append(self._scroller)
             box.append(self._status)
-            self.widget = box
+            self.widget = self._wrap_with_hint(box)
             click = Gtk.GestureClick()
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pressed)
@@ -2589,6 +2674,12 @@ def build_native_classes(g):
             self._build_header()
             self._build_body()
             self._install_actions()
+            self._hint_detector = ShortcutHintDetector()
+            self._hint_pane_id = None
+            dead_keys = Gtk.EventControllerKey()
+            dead_keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            dead_keys.connect("key-pressed", self._on_dead_key)
+            self.add_controller(dead_keys)
             self._open_initial_tabs()
 
         def _build_header(self):
@@ -2856,6 +2947,26 @@ def build_native_classes(g):
         def _active_pane(self):
             tab = self.active_tab()
             return tab.active_pane() if tab else None
+
+        def _on_dead_key(self, controller, keyval, keycode, state):
+            """A key press nothing in the window handled (bubble phase).
+
+            With focus on a viewer pane these are exactly the "typed
+            something, nothing happened" strokes; a quick run of them
+            usually means the user is hunting for a shortcut, so nudge
+            them toward the guide. Never consumes the key.
+            """
+            pane = self._active_pane()
+            if pane is None or pane.kind == "terminal":
+                return False
+            if (Gdk.keyval_name(keyval) or "") in MODIFIER_KEYVAL_NAMES:
+                return False
+            if pane.pane_id != self._hint_pane_id:
+                self._hint_pane_id = pane.pane_id
+                self._hint_detector.reset()
+            if self._hint_detector.record(time.monotonic()):
+                pane.show_shortcut_hint()
+            return False
 
         def _route(self, method):
             pane = self._active_pane()
