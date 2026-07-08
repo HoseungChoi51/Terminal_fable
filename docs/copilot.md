@@ -51,6 +51,10 @@ Recipes cover the common needs — "sort by size", "kill process on
 port", "unzip all files", "split video into frames", git/docker/kubectl
 workflows — with `<placeholder>` slots you fill in before running.
 
+For a hands-on checklist of what to try and what to watch while
+dogfooding this phase, see the
+[P2 test guide](copilot-p2-test-guide.md).
+
 Later phases (context-aware suggestions, ghost text, the LLM intent
 panel) are described in the development plan.
 

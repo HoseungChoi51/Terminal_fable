@@ -16,6 +16,9 @@ trying to do.
   panes.
 - **[copilot.md](copilot.md)** — the context-aware terminal copilot: what has
   shipped, shell integration, privacy, and configuration.
+- **[copilot-p2-test-guide.md](copilot-p2-test-guide.md)** — dogfooding
+  checklist for the P2 command menu: what to try, what to watch, what is not a
+  bug.
 - **[../README.md](../README.md)** — project overview, requirements, install, and
   options at a glance.
 
