@@ -74,6 +74,20 @@ non-bash shells, when disabled in config, and when
 terminal still tracks the working directory (OSC 7), so directory-based
 features keep working.
 
+**A note on a possible brief flash.** The integration works by having
+the shell emit small marker escape sequences (OSC 666 termprops) each
+time you run a command. VTE 0.84 occasionally *paints* one of these
+markers for a single frame before it parses and removes it, so you may
+rarely glimpse a fragment like `]666;…` at the cursor when you press
+Enter. The terminal content is never actually affected — it is a
+display-only quirk of VTE, and the markers must use the ST terminator
+(VTE ignores the flash-free BEL form for termprops). The snippet keeps
+its markers as short and as few writes as possible to minimize this. If
+it still bothers you, set `assistant.shell_integration: false` (or
+`AGENT_TERMINAL_NO_INTEGRATION=1`) to stop emitting the markers
+entirely; command-based features then degrade to working-directory
+only.
+
 **Privacy.** A command typed with a leading space is never recorded —
 this is enforced in the shell snippet itself, so it does not depend on
 your `HISTCONTROL`. All stored command text and output is passed through
