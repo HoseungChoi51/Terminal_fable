@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
+from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
 from agent_terminal.copilot import suggest as copilot_suggest
@@ -3507,6 +3508,9 @@ def build_native_classes(g):
                 return
             history = ([r.cmd for r in journal.snapshot() if r.cmd]
                        if journal is not None else [])
+            recipes = (copilot_recipes.BUILTIN_RECIPES
+                       if self.options.native_config.assistant.recipes.enabled
+                       else ())
             if self._completion_popover is not None:
                 self._completion_popover.popdown()
 
@@ -3538,7 +3542,7 @@ def build_native_classes(g):
                     listbox.remove(child)
                     child = nxt
                 for suggestion in copilot_suggest.build_suggestions(
-                        query, history=history):
+                        query, recipes=recipes, history=history):
                     listbox.append(self._suggestion_row(suggestion))
                 first = listbox.get_row_at_index(0)
                 if first is not None:
