@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import binascii
 import itertools
-import re
 from collections import deque
 from dataclasses import dataclass
 
@@ -39,11 +38,6 @@ CAPTURE_NONE = "none"
 INTEGRATION_NONE = "cwd-only"
 INTEGRATION_TERMPROPS = "integrated"
 
-# bash `history` output is "%5d%c %s": digits, one marker char (space
-# or *), one separator space, then the command verbatim.
-_HISTORY_LINE = re.compile(r"^\s*\d+(?:\*| ) (.*)$", re.DOTALL)
-
-
 @dataclass(frozen=True)
 class CommandRecord:
     seq: int
@@ -57,27 +51,13 @@ class CommandRecord:
     redacted: bool = False
 
 
-def parse_history_line(text) -> str | None:
-    """Extract the command from a bash `history 1` line.
-
-    " 1016* git status" -> "git status"; multi-line commands keep their
-    newlines (DOTALL); anything unparseable yields None.
-    """
-    if not isinstance(text, str):
-        return None
-    match = _HISTORY_LINE.match(text)
-    if match is None:
-        return None
-    command = match.group(1)
-    if command.startswith(" "):
-        # Leading space = deliberately hidden command (ignorespace
-        # convention). Second line of defense behind the shell snippet.
-        return None
-    return command if command.strip() else None
-
-
 def decode_command_payload(value) -> str | None:
-    """Decode the base64 `history 1` payload from the ext termprop."""
+    """Decode the base64 command payload from the ext termprop.
+
+    The shell snippet already stripped the `history` number/marker and
+    dropped leading-space (hidden) commands; this decodes the command
+    text, with a leading-space check as a second line of defense.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -85,7 +65,9 @@ def decode_command_payload(value) -> str | None:
             "utf-8", "replace")
     except (binascii.Error, ValueError):
         return None
-    return parse_history_line(decoded)
+    if decoded.startswith(" "):
+        return None
+    return decoded if decoded.strip() else None
 
 
 class _Pending:

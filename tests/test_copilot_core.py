@@ -106,41 +106,30 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(out, ("before", credact.REDACTED, "after"))
 
 
-class HistoryParseTests(unittest.TestCase):
-    def test_plain(self):
-        self.assertEqual(cjournal.parse_history_line(" 1016  git status"),
-                         "git status")
-
-    def test_modified_marker(self):
-        self.assertEqual(cjournal.parse_history_line(" 12* ls -la"),
-                         "ls -la")
-
-    def test_multiline(self):
-        self.assertEqual(
-            cjournal.parse_history_line(" 7  for f in *; do\necho $f\ndone"),
-            "for f in *; do\necho $f\ndone")
-
-    def test_garbage(self):
-        self.assertIsNone(cjournal.parse_history_line("no number here"))
-        self.assertIsNone(cjournal.parse_history_line(None))
-        self.assertIsNone(cjournal.parse_history_line(" 3   "))
-
-    def test_hidden_leading_space_command_never_parsed(self):
-        # "%5d%c %s": three spaces after the digits means the command
-        # itself starts with a space — the user hid it deliberately.
-        self.assertIsNone(cjournal.parse_history_line(
-            "    5   echo hidden-secret"))
-
-    def test_decode_payload(self):
-        payload = base64.b64encode(b" 44  echo 'a; b'").decode()
+class DecodePayloadTests(unittest.TestCase):
+    def test_plain_command(self):
+        payload = base64.b64encode(b"echo 'a; b'").decode()
         self.assertEqual(cjournal.decode_command_payload(payload),
                          "echo 'a; b'")
+
+    def test_multiline_command(self):
+        payload = base64.b64encode(b"for f in *; do\necho $f\ndone").decode()
+        self.assertEqual(cjournal.decode_command_payload(payload),
+                         "for f in *; do\necho $f\ndone")
+
+    def test_leading_space_hidden(self):
+        payload = base64.b64encode(b" echo hidden").decode()
+        self.assertIsNone(cjournal.decode_command_payload(payload))
+
+    def test_garbage(self):
         self.assertIsNone(cjournal.decode_command_payload("not base64!!"))
         self.assertIsNone(cjournal.decode_command_payload(None))
+        self.assertIsNone(cjournal.decode_command_payload(
+            base64.b64encode(b"   ").decode()))
 
 
-def _cmd_payload(text, num=100):
-    return base64.b64encode(f" {num}  {text}".encode()).decode()
+def _cmd_payload(text):
+    return base64.b64encode(text.encode()).decode()
 
 
 class JournalTests(unittest.TestCase):
@@ -149,14 +138,13 @@ class JournalTests(unittest.TestCase):
             max_commands=3, store_output=True, output_tail_lines=2))
 
     def run_command(self, cmd="echo hi", exit_code=0, start_row=10,
-                    end_row=13, lines=("out1", "out2", "out3"), num=100):
+                    end_row=13, lines=("out1", "out2", "out3")):
         self.journal.apply_batch([(cjournal.PREEXEC, None)],
                                  timestamp=1.0, wall_time=1000.0,
                                  cwd="/home/x", cursor_row=start_row)
         events = [(cjournal.POSTEXEC, exit_code), (cjournal.PRECMD, None)]
         if cmd is not None:
-            events.insert(0, (cjournal.COMMAND_TERMPROP,
-                              _cmd_payload(cmd, num)))
+            events.insert(0, (cjournal.COMMAND_TERMPROP, _cmd_payload(cmd)))
         self.journal.apply_batch(
             events, timestamp=2.5, wall_time=1001.5, cwd="/home/x",
             cursor_row=end_row,
@@ -208,7 +196,7 @@ class JournalTests(unittest.TestCase):
 
     def test_ring_caps_records(self):
         for i in range(5):
-            self.run_command(cmd=f"cmd{i}", num=100 + i)
+            self.run_command(cmd=f"cmd{i}")
         self.assertEqual(len(self.journal.records), 3)
         self.assertEqual([r.cmd for r in self.journal.records],
                          ["cmd2", "cmd3", "cmd4"])

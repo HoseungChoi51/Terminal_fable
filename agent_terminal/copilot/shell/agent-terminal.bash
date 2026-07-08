@@ -28,9 +28,9 @@ _agentterm_signal() {
 }
 
 _agentterm_precmd() {
-    local errsv="$?" entry rest b64
-    printf '\033]666;vte.shell.postexec=%s\033\\' "$errsv"
+    local errsv="$?" entry rest b64 cmd out
     entry="$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" || entry=""
+    cmd=""
     if [ -n "$entry" ] && [ "$entry" != "$_agentterm_last_hist" ]; then
         _agentterm_last_hist="$entry"
         # `history` prints "%5d%c %s": digits, a marker char, one space,
@@ -42,14 +42,23 @@ _agentterm_precmd() {
         rest="${rest#"${rest%%[!0-9]*}"}"    # drop the number
         rest="${rest#?}"                      # drop the marker char
         rest="${rest#?}"                      # drop the separator space
-        if [ "${rest# }" = "$rest" ]; then
-            if b64="$(printf '%s' "$entry" | base64 2>/dev/null)"; then
-                printf '\033]666;vte.ext.agentterm.cmd=%s\033\\' \
-                    "${b64//$'\n'/}"
+        # Encode only the command (not the history number/padding): a
+        # shorter OSC payload means a shorter transient render if VTE
+        # paints the marker before parsing it.
+        if [ -n "$rest" ] && [ "${rest# }" = "$rest" ]; then
+            if b64="$(printf '%s' "$rest" | base64 2>/dev/null)"; then
+                cmd="${b64//$'\n'/}"
             fi
         fi
     fi
-    printf '\033]666;vte.shell.precmd!\033\\'
+    # Emit the whole prompt-boundary burst in ONE printf/write so VTE
+    # processes it in a single input pass, minimizing the chance a frame
+    # is painted with a half-parsed marker on screen.
+    out=$(printf '\033]666;vte.shell.postexec=%s\033\\' "$errsv")
+    [ -n "$cmd" ] && out+=$(printf '\033]666;vte.ext.agentterm.cmd=%s\033\\' \
+        "$cmd")
+    out+=$(printf '\033]666;vte.shell.precmd!\033\\')
+    printf '%s' "$out"
     return "$errsv"
 }
 
