@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
+from agent_terminal.copilot import llm as copilot_llm
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
@@ -1195,7 +1196,8 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-menu", "copilot-pause", "copilot-debug", "copilot-sessions",
+    "copilot-menu", "copilot-panel", "copilot-pause", "copilot-debug",
+    "copilot-sessions",
     "shortcuts", "preferences", "quit",
 )
 
@@ -1235,6 +1237,7 @@ ACCELERATORS = {
     "zoom-out": ("<Ctrl>minus",),
     "zoom-reset": ("<Ctrl>0",),
     "copilot-menu": ("<Ctrl><Shift>space",),
+    "copilot-panel": ("<Ctrl><Shift>p",),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1", "<Ctrl>question"),
@@ -1444,6 +1447,12 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .risk-privileged { background-color: alpha(#9a5a3a, 0.55); }
 .risk-destructive { background-color: alpha(#a03a3a, 0.7); color: #fff; }
 .risk-unknown { background-color: alpha(#6a6a6a, 0.4); }
+
+/* Intent side panel (copilot). */
+.intent-notice { color: alpha(currentColor, 0.7); font-size: 0.88em; }
+.intent-card { background-color: alpha(currentColor, 0.06);
+               border-radius: 8px; padding: 8px 10px; }
+.intent-explain { color: alpha(currentColor, 0.72); font-size: 0.85em; }
 """
 
 SESSION_CHECKPOINT_SECONDS = 60
@@ -1583,6 +1592,9 @@ def build_native_classes(g):
             pass
 
         def insert_text(self, text):
+            pass
+
+        def dispose(self):
             pass
 
     class ShortcutHintMixin:
@@ -2378,6 +2390,202 @@ def build_native_classes(g):
                 return True
             return False
 
+    class IntentPane(ShortcutHintMixin, PaneBase):
+        """Natural-language → command templates via the LLM (copilot P5).
+
+        Describe a goal; the assistant returns risk-labeled command
+        templates you can insert (never run), copy, or explain. All
+        network work happens on a worker thread through the gated,
+        redacting choke point in copilot.llm.
+        """
+
+        kind = "intent"
+
+        def __init__(self, *, config, gather_context, on_insert,
+                     on_activated=None):
+            super().__init__(next_pane_id(), "Assistant")
+            self._config = config
+            self._gather_context = gather_context
+            self._on_insert = on_insert
+            self.on_activated = on_activated
+            self._alive = True
+            self._build()
+
+        def _build(self):
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            outer.add_css_class("intent-pane")
+            outer.set_margin_top(10)
+            outer.set_margin_bottom(10)
+            outer.set_margin_start(12)
+            outer.set_margin_end(12)
+            heading = Gtk.Label(label="Describe what you want to do")
+            heading.set_xalign(0.0)
+            heading.add_css_class("heading")
+            ask_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            self._entry = Gtk.Entry()
+            self._entry.set_hexpand(True)
+            self._entry.set_placeholder_text(
+                "e.g. split a video into frames")
+            self._entry.connect("activate", lambda *_: self._submit())
+            self._ask = Gtk.Button(label="Ask")
+            self._ask.connect("clicked", lambda *_: self._submit())
+            self._spinner = Gtk.Spinner()
+            ask_row.append(self._entry)
+            ask_row.append(self._ask)
+            ask_row.append(self._spinner)
+            self._notice = Gtk.Label()
+            self._notice.set_xalign(0.0)
+            self._notice.set_wrap(True)
+            self._notice.add_css_class("intent-notice")
+            self._results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                    spacing=8)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_child(self._results)
+            outer.append(heading)
+            outer.append(ask_row)
+            outer.append(self._notice)
+            outer.append(scroller)
+            self.widget = self._wrap_with_hint(outer)
+            click = Gtk.GestureClick()
+            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            click.connect("pressed", lambda *_: (self.on_activated
+                                                 and self.on_activated(self)))
+            self.widget.add_controller(click)
+            if not self._config.allow_remote_context:
+                self._notice.set_text(
+                    "Remote assistant is off. Set "
+                    "assistant.llm.allow_remote_context to true in "
+                    "~/.config/agent-terminal/native.json to enable it. "
+                    "Context sent to the model is always redacted first.")
+
+        def focus(self):
+            self._entry.grab_focus()
+
+        def _clear_results(self):
+            child = self._results.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                self._results.remove(child)
+                child = nxt
+
+        def _submit(self):
+            query = self._entry.get_text().strip()
+            if not query:
+                return
+            self._clear_results()
+            self._notice.set_text("")
+            self._spinner.start()
+            self._ask.set_sensitive(False)
+            context = self._gather_context()
+            config = self._config
+
+            def work():
+                try:
+                    result = copilot_llm.suggest_commands(
+                        config, query=query, **context)
+                    GLib.idle_add(self._show_result, result)
+                except copilot_llm.LlmError as exc:
+                    GLib.idle_add(self._show_error, str(exc))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _finish_request(self):
+            self._spinner.stop()
+            self._ask.set_sensitive(True)
+
+        def _show_error(self, message):
+            if not self._alive:
+                return GLib.SOURCE_REMOVE
+            self._finish_request()
+            self._notice.set_text(message)
+            return GLib.SOURCE_REMOVE
+
+        def _show_result(self, result):
+            if not self._alive:
+                return GLib.SOURCE_REMOVE
+            self._finish_request()
+            if not result.templates:
+                self._notice.set_text("No suggestions came back. Try "
+                                      "rephrasing the goal.")
+                return GLib.SOURCE_REMOVE
+            if result.note:
+                self._notice.set_text(result.note)
+            for template in result.templates:
+                self._results.append(self._template_card(template))
+            return GLib.SOURCE_REMOVE
+
+        def _template_card(self, template):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            card.add_css_class("intent-card")
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            cmd = Gtk.Label(label=template.command)
+            cmd.set_xalign(0.0)
+            cmd.set_hexpand(True)
+            cmd.set_wrap(True)
+            cmd.set_selectable(True)
+            cmd.add_css_class("copilot-cmd")
+            badge = Gtk.Label(label=template.risk.display)
+            badge.set_valign(Gtk.Align.START)
+            badge.add_css_class("risk-badge")
+            badge.add_css_class(f"risk-{template.risk.display}")
+            header.append(cmd)
+            header.append(badge)
+            card.append(header)
+            if template.description:
+                desc = Gtk.Label(label=template.description)
+                desc.set_xalign(0.0)
+                desc.set_wrap(True)
+                desc.add_css_class("copilot-desc")
+                card.append(desc)
+            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            insert = Gtk.Button(label="Insert")
+            insert.connect("clicked",
+                           lambda *_: self._on_insert(template.command))
+            copy = Gtk.Button(label="Copy")
+            copy.connect("clicked", lambda *_: self._copy(template.command))
+            explain = Gtk.Button(label="Explain")
+            explain_label = Gtk.Label()
+            explain_label.set_xalign(0.0)
+            explain_label.set_wrap(True)
+            explain_label.add_css_class("intent-explain")
+            explain.connect(
+                "clicked",
+                lambda *_: self._explain(template.command, explain_label))
+            buttons.append(insert)
+            buttons.append(copy)
+            buttons.append(explain)
+            card.append(buttons)
+            card.append(explain_label)
+            return card
+
+        def _copy(self, text):
+            try:
+                self.widget.get_clipboard().set(text)
+            except Exception:
+                pass
+
+        def _explain(self, command, label):
+            label.set_text("…")
+            config = self._config
+
+            def work():
+                try:
+                    text = copilot_llm.explain(config, command)
+                except copilot_llm.LlmError as exc:
+                    text = str(exc)
+                GLib.idle_add(self._set_label, label, text)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _set_label(self, label, text):
+            if self._alive:
+                label.set_text(text)
+            return GLib.SOURCE_REMOVE
+
+        def dispose(self):
+            self._alive = False
+
     class AgentPaneLayoutWidget(Gtk.Widget):
         """Custom container that hands its allocation to the layout owner."""
 
@@ -2614,6 +2822,7 @@ def build_native_classes(g):
             if pane is None:
                 return
             self.window.flush_pane_session(pane)
+            pane.dispose()
             self.push_history()
             self.fit_focused_root = None
             self.root = layout_remove_leaf(self.root, pane_id,
@@ -2747,6 +2956,7 @@ def build_native_classes(g):
 
         def dispose(self):
             for pane_id in list(self.panes):
+                self.panes[pane_id].dispose()
                 self.container.remove_pane(pane_id)
             self.panes.clear()
 
@@ -2933,6 +3143,7 @@ def build_native_classes(g):
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
+            view.append("Assistant Panel…", "win.copilot-panel")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
@@ -3438,6 +3649,8 @@ def build_native_classes(g):
                 self._route("zoom_reset")
             elif name == "copilot-menu":
                 self.show_completion_menu()
+            elif name == "copilot-panel":
+                self.show_intent_panel()
             elif name == "copilot-pause":
                 self.toggle_copilot_pause()
             elif name == "copilot-debug":
@@ -3465,6 +3678,39 @@ def build_native_classes(g):
             self.open_path(str(path))
 
         # -- completion menu + pause (copilot P2) ---------------------------
+
+        def show_intent_panel(self):
+            tab = self.active_tab()
+            if tab is None:
+                return
+            pane = IntentPane(
+                config=self.options.native_config.assistant.llm,
+                gather_context=self._assistant_context,
+                on_insert=self.insert_into_active_terminal,
+                on_activated=self._on_viewer_activated)
+            tab.add_pane(pane, VERTICAL)
+
+        def _assistant_context(self):
+            """cwd + project + recent commands from the recent terminal pane."""
+            tab = self.active_tab()
+            pane = None
+            if tab is not None:
+                pane = tab.panes.get(tab._recent_terminal_id)
+                if pane is None or pane.kind != "terminal":
+                    pane = next((p for p in tab.panes.values()
+                                 if p.kind == "terminal"), None)
+            cwd, recent = None, []
+            if pane is not None:
+                try:
+                    cwd = pane.current_directory()
+                except Exception:
+                    cwd = None
+                journal = getattr(pane, "journal", None)
+                if journal is not None:
+                    recent = [r.cmd for r in journal.snapshot() if r.cmd]
+            project = os.path.basename(cwd.rstrip("/")) if cwd else None
+            return {"cwd": cwd, "project": project or None,
+                    "recent_commands": recent}
 
         def toggle_copilot_pause(self):
             pane = self._active_pane()
@@ -3801,6 +4047,7 @@ def build_native_classes(g):
         TerminalPane=TerminalPane,
         MarkdownPane=MarkdownPane,
         ImagePane=ImagePane,
+        IntentPane=IntentPane,
         AgentPaneLayoutWidget=AgentPaneLayoutWidget,
         PaneLayoutContainer=PaneLayoutContainer,
         TerminalTab=TerminalTab,

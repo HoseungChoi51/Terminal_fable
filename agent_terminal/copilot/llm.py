@@ -113,6 +113,12 @@ _SUMMARY_SYSTEM = (
     "failed. Be concrete and brief. No preamble, no markdown headers."
 )
 
+_EXPLAIN_SYSTEM = (
+    "Explain what a shell command does in 2-4 concise plain-text "
+    "sentences, calling out anything destructive or irreversible. No "
+    "markdown, no preamble."
+)
+
 
 def intent_messages(query, context):
     user = f"Context:\n{context}\n\nGoal: {query}" if context else query
@@ -225,3 +231,10 @@ def summarize(config, *, cwd=None, project=None, recent_commands=(),
                             send_output=config.send_output)
     return OpenAIProvider(config, opener=opener).complete(
         summary_messages(context)).strip()
+
+
+def explain(config, command, *, opener=None) -> str:
+    ContextGate(config).ensure_allowed()
+    messages = [{"role": "system", "content": _EXPLAIN_SYSTEM},
+                {"role": "user", "content": redact.redact_line(command)[0]}]
+    return OpenAIProvider(config, opener=opener).complete(messages).strip()

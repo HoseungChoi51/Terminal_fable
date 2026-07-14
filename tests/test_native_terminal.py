@@ -590,7 +590,8 @@ class ActionTests(unittest.TestCase):
         "copy", "paste", "select-all", "find", "find-next", "find-previous",
         "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
-        "copilot-menu", "copilot-pause", "copilot-sessions", "copilot-debug",
+        "copilot-menu", "copilot-panel", "copilot-pause", "copilot-sessions",
+        "copilot-debug",
         "shortcuts", "preferences", "quit",
     )
 
@@ -618,6 +619,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
         self.assertIn("<Ctrl><Shift>s", nt.ACCELERATORS["copilot-sessions"])
         self.assertIn("<Ctrl><Shift>space", nt.ACCELERATORS["copilot-menu"])
+        self.assertIn("<Ctrl><Shift>p", nt.ACCELERATORS["copilot-panel"])
         self.assertIn("<Alt><Shift>a", nt.ACCELERATORS["copilot-pause"])
 
     def test_copilot_accelerators_not_reserved(self):

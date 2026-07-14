@@ -176,6 +176,25 @@ class SummaryTests(unittest.TestCase):
                               cwd="/home/x/proj", opener=opener)
         self.assertEqual(text, "You cleaned up build artifacts in ~/proj.")
 
+    def test_summary_gated(self):
+        opener = FakeOpener()
+        with self.assertRaises(cllm.RemoteDisabledError):
+            cllm.summarize(LlmConfig(), recent_commands=["ls"], opener=opener)
+
+
+class ExplainTests(unittest.TestCase):
+    def test_explain_returns_text_and_redacts(self):
+        opener = FakeOpener("Removes the build directory recursively.")
+        text = cllm.explain(_cfg(), "rm -rf build --token=abc123secret",
+                            opener=opener)
+        self.assertEqual(text, "Removes the build directory recursively.")
+        self.assertNotIn("abc123secret", opener.sent_text())
+
+    def test_explain_gated(self):
+        opener = FakeOpener()
+        with self.assertRaises(cllm.RemoteDisabledError):
+            cllm.explain(LlmConfig(), "ls", opener=opener)
+
 
 class ErrorHandlingTests(unittest.TestCase):
     def test_urlerror_becomes_llmerror(self):
