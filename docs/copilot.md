@@ -51,6 +51,29 @@ Recipes cover the common needs — "sort by size", "kill process on
 port", "unzip all files", "split video into frames", git/docker/kubectl
 workflows — with `<placeholder>` slots you fill in before running.
 
+**Phase P3 — context awareness (shipped).** The menu now understands
+where you are and what you are typing:
+
+- *Project commands* — in a Python/Node/Rust/Go/Make/Just project, the
+  menu suggests the right run/test commands (`pytest`, `uv run …`,
+  `npm run dev`, `cargo test`), preferring commands it finds in your
+  README, so typing `py` surfaces how to run *this* project.
+- *Argument completion* — the menu completes the argument a command
+  expects: directories after `cd`, files after `cat`, archives after
+  `tar -xf`, media after `ffmpeg -i`, the newest `.deb` after
+  `sudo apt install ./`, branches after `git checkout`, changed files
+  after `git add`, hosts after `ssh`.
+- *Typo correction* — a mistyped command or subcommand (`rysnc`,
+  `kubectl detele`), a broken URL prefix (`ttps://`), or a path slip
+  (`.../`) is offered as a "did you mean" fix. When a command fails
+  with "command not found", a quiet chip suggests the correction; click
+  to insert it (it never runs on its own). A correction that would make
+  a command *more dangerous* is offered only in the menu, never in the
+  one-click chip.
+
+Everything here is local — no network, and directories are scanned only
+when you open the menu, never in the background.
+
 For a hands-on checklist of what to try and what to watch while
 dogfooding this phase, see the
 [P2 test guide](copilot-p2-test-guide.md).

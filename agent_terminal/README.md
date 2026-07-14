@@ -14,7 +14,7 @@
 | P0 foundation | ✅ shipped | Shell integration, per-pane command journal, secret redaction, config |
 | P1 titles + sessions | ✅ shipped | Auto `project: command` tab titles; session history/restore |
 | P2 command menu | ✅ shipped | Ctrl+Shift+Space fuzzy menu, risk badges, per-pane pause |
-| P3 context heuristics | ⬜ next | Project/README awareness, argument completion, typo hints (local, no LLM) |
+| P3 context heuristics | ✅ shipped | Project/README awareness, argument completion, typo hints (local, no LLM) |
 | P4 ghost text | ✅ shipped (default off) | Inline history completion at the cursor + prompt tracker (local, no LLM) |
 | P5 LLM assistant | ✅ shipped (early, for dogfooding) | Intent panel, session summaries, endpoint indicator |
 | P6 learning/polish | ⬜ planned | Acceptance tracking, personalized ranking |
@@ -26,7 +26,8 @@
 | Command journal | automatic | Per pane: command, cwd, exit code, duration, redacted output tail. Inspect: **View ▸ Copilot Journal (Debug)** |
 | Auto tab titles | automatic | `project: command`; damped; program titles (vim/ssh) win while running |
 | Session history | **Ctrl+Shift+S** | Restore = new tab at last cwd + summary pane; "Insert last command" types, never runs |
-| Command menu | **Ctrl+Shift+Space** | Recipes + your history, fuzzy search, risk badges; Enter inserts **without newline** |
+| Command menu | **Ctrl+Shift+Space** | Recipes + history + context (project/README, argument completion, typo fixes), risk badges; Enter inserts **without newline** |
+| "Did you mean" chip | on a not-found command | Suggests the typo fix; click inserts it, never runs it |
 | Assistant panel | **Ctrl+Shift+P** | Natural language → command templates (insert/copy/explain); needs the LLM gate on; one per tab — repeat press jumps to it |
 | Session summary | **View ▸ Session Summary…** | LLM-polished when remote is on, heuristic otherwise; footer names the source |
 | Ghost text | type at prompt | Dim inline completion from your history; **Right**/**Ctrl+Right** accepts, **Esc** dismisses; default off (`suggestions.ghost_text`) |
@@ -75,10 +76,12 @@ never back — ADR 0005). GTK wiring lives in `native_terminal.py`.
 | `titles.py` | P1 | Title inference + damping |
 | `sessions.py` | P1 | Session build/store/list/sweep (XDG data dir) |
 | `fuzzy.py` `risk.py` `recipes.py` `suggest.py` | P2 | Scorer, risk classifier, builtin recipes, merge/rank |
+| `context.py` `typo.py` | P3 | Project/README/argument context, typo correction |
+| `prompt.py` | P4 | Prompt-line state machine for ghost text |
 | `llm.py` | P5 | OpenAI-compatible client, ContextGate, redacting choke point |
 
-Tests: `tests/test_copilot_{core,sessions,suggest,llm}.py` (all headless;
-run `python3 -m unittest discover -s tests`).
+Tests: `tests/test_copilot_{core,sessions,suggest,context,prompt,llm}.py`
+(all headless; run `python3 -m unittest discover -s tests`).
 
 ## Known quirks / rough edges
 
