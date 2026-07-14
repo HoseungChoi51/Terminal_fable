@@ -86,6 +86,46 @@ def build_suggestions(query, *, recipes=recipes_mod.BUILTIN_RECIPES,
     return ranked[:limit] if limit is not None else ranked
 
 
+# Ghost text is deliberately conservative: it completes from your own
+# history readily, and from generic recipes only if you lower the bar.
+_GHOST_HISTORY_CONFIDENCE = 0.9
+_GHOST_RECIPE_CONFIDENCE = 0.6
+_GHOST_MIN_PREFIX = 2
+_GHOST_SAFE_RISK = frozenset({risk_mod.READ_ONLY, risk_mod.LOCAL_CHANGE})
+
+
+def ghost_completion(typed, *, recipes=recipes_mod.BUILTIN_RECIPES,
+                     history=(), min_confidence=0.7):
+    """Suffix to show as inline ghost text after `typed`, or None.
+
+    Prefers the most recent history command that extends the prefix,
+    then a recipe. Never ghosts a destructive/privileged/unknown command
+    (design doc 8.4), a multi-line command, or below min_confidence.
+    """
+    if len(typed) < _GHOST_MIN_PREFIX:
+        return None
+    command = None
+    confidence = 0.0
+    for candidate in _dedupe_history(history):
+        if candidate.startswith(typed) and candidate != typed:
+            command, confidence = candidate, _GHOST_HISTORY_CONFIDENCE
+            break
+    if command is None:
+        for recipe in recipes:
+            if (recipe.command.startswith(typed)
+                    and recipe.command != typed):
+                command, confidence = recipe.command, _GHOST_RECIPE_CONFIDENCE
+                break
+    if command is None or confidence < min_confidence:
+        return None
+    if risk_mod.classify(command).display not in _GHOST_SAFE_RISK:
+        return None
+    suffix = command[len(typed):]
+    if "\n" in suffix or not suffix:
+        return None
+    return suffix
+
+
 def insert_plan(typed, command):
     """How to insert `command` given what is already typed.
 

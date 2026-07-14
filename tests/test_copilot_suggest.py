@@ -188,6 +188,54 @@ class SuggestTests(unittest.TestCase):
         self.assertEqual(match.risk.display, crisk.DESTRUCTIVE)
 
 
+class GhostCompletionTests(unittest.TestCase):
+    def test_completes_from_history(self):
+        suffix = csuggest.ghost_completion(
+            "git st", history=["git status -sb"])
+        self.assertEqual(suffix, "atus -sb")
+
+    def test_most_recent_history_wins(self):
+        suffix = csuggest.ghost_completion(
+            "make ", history=["make one", "make two", "make three"])
+        self.assertEqual(suffix, "three")
+
+    def test_too_short_prefix(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "g", history=["git status"]))
+
+    def test_no_match(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "zzz", history=["git status"]))
+
+    def test_never_ghosts_destructive(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "rm ", history=["rm -rf build"]))
+
+    def test_never_ghosts_privileged(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "sud", history=["sudo apt update"]))
+
+    def test_never_ghosts_multiline(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "for", history=["for f in *; do\necho $f\ndone"]))
+
+    def test_recipes_below_default_threshold(self):
+        # a recipe prefix does not ghost at the default confidence...
+        self.assertIsNone(csuggest.ghost_completion("du -a"))
+        # ...but does when the bar is lowered
+        self.assertIsNotNone(
+            csuggest.ghost_completion("du -a", min_confidence=0.6))
+
+    def test_history_outranks_recipe(self):
+        suffix = csuggest.ghost_completion(
+            "du ", history=["du -sh ."], min_confidence=0.6)
+        self.assertEqual(suffix, "-sh .")
+
+    def test_exact_match_no_ghost(self):
+        self.assertIsNone(csuggest.ghost_completion(
+            "git status", history=["git status"]))
+
+
 class InsertPlanTests(unittest.TestCase):
     def test_prefix_completion_feeds_suffix(self):
         clear, text = csuggest.insert_plan("git ", "git status")
