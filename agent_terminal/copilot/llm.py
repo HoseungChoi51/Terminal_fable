@@ -21,6 +21,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from agent_terminal.copilot import redact
 from agent_terminal.copilot import risk as risk_mod
@@ -52,6 +53,12 @@ class IntentResult:
 
 
 # -- gate ---------------------------------------------------------------
+
+def endpoint_label(config) -> str:
+    """Human-readable "model @ host" for showing where requests go."""
+    host = urlsplit(config.base_url).netloc or config.base_url
+    return f"{config.model} @ {host}"
+
 
 class ContextGate:
     """The one place that decides whether anything may go remote."""
@@ -120,14 +127,18 @@ _EXPLAIN_SYSTEM = (
 )
 
 
-def intent_messages(query, context):
+def _system(base, suffix):
+    return base + ("\n" + suffix if suffix else "")
+
+
+def intent_messages(query, context, suffix=""):
     user = f"Context:\n{context}\n\nGoal: {query}" if context else query
-    return [{"role": "system", "content": _INTENT_SYSTEM},
+    return [{"role": "system", "content": _system(_INTENT_SYSTEM, suffix)},
             {"role": "user", "content": user}]
 
 
-def summary_messages(context):
-    return [{"role": "system", "content": _SUMMARY_SYSTEM},
+def summary_messages(context, suffix=""):
+    return [{"role": "system", "content": _system(_SUMMARY_SYSTEM, suffix)},
             {"role": "user", "content": context}]
 
 
@@ -218,7 +229,8 @@ def suggest_commands(config, *, query, cwd=None, project=None,
     context = build_context(cwd=cwd, project=project,
                             recent_commands=recent_commands)
     text = OpenAIProvider(config, opener=opener).complete(
-        intent_messages(query, context), json_mode=True)
+        intent_messages(query, context, config.system_suffix),
+        json_mode=True)
     return parse_intent_response(text)
 
 
@@ -230,11 +242,12 @@ def summarize(config, *, cwd=None, project=None, recent_commands=(),
                             output_tails=output_tails,
                             send_output=config.send_output)
     return OpenAIProvider(config, opener=opener).complete(
-        summary_messages(context)).strip()
+        summary_messages(context, config.system_suffix)).strip()
 
 
 def explain(config, command, *, opener=None) -> str:
     ContextGate(config).ensure_allowed()
-    messages = [{"role": "system", "content": _EXPLAIN_SYSTEM},
+    messages = [{"role": "system",
+                 "content": _system(_EXPLAIN_SYSTEM, config.system_suffix)},
                 {"role": "user", "content": redact.redact_line(command)[0]}]
     return OpenAIProvider(config, opener=opener).complete(messages).strip()

@@ -56,6 +56,9 @@ class LlmConfig:
     allow_remote_context: bool = False
     send_output: bool = False
     timeout_s: int = 30
+    # Appended to the system prompt; lets endpoint quirks be handled by
+    # config alone (e.g. "/no_think" to disable Qwen thinking on Ollama).
+    system_suffix: str = ""
 
 
 @dataclass(frozen=True)

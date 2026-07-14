@@ -1449,6 +1449,8 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .risk-unknown { background-color: alpha(#6a6a6a, 0.4); }
 
 /* Intent side panel (copilot). */
+.intent-endpoint { color: alpha(currentColor, 0.55); font-size: 0.8em;
+                   font-family: monospace; }
 .intent-notice { color: alpha(currentColor, 0.7); font-size: 0.88em; }
 .intent-card { background-color: alpha(currentColor, 0.06);
                border-radius: 8px; padding: 8px 10px; }
@@ -2421,6 +2423,13 @@ def build_native_classes(g):
             heading = Gtk.Label(label="Describe what you want to do")
             heading.set_xalign(0.0)
             heading.add_css_class("heading")
+            # Always show where a request would go (and whether it can).
+            endpoint = copilot_llm.endpoint_label(self._config)
+            if not self._config.allow_remote_context:
+                endpoint += " · remote off"
+            self._endpoint_label = Gtk.Label(label=endpoint)
+            self._endpoint_label.set_xalign(0.0)
+            self._endpoint_label.add_css_class("intent-endpoint")
             ask_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             self._entry = Gtk.Entry()
             self._entry.set_hexpand(True)
@@ -2443,6 +2452,7 @@ def build_native_classes(g):
             scroller.set_vexpand(True)
             scroller.set_child(self._results)
             outer.append(heading)
+            outer.append(self._endpoint_label)
             outer.append(ask_row)
             outer.append(self._notice)
             outer.append(scroller)
@@ -3787,16 +3797,28 @@ def build_native_classes(g):
             scroller = Gtk.ScrolledWindow()
             scroller.set_vexpand(True)
             scroller.set_child(label)
-            dialog.set_child(scroller)
+            source = Gtk.Label()
+            source.set_xalign(0.0)
+            source.add_css_class("intent-endpoint")
+            source.set_margin_start(16)
+            source.set_margin_end(16)
+            source.set_margin_bottom(8)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.append(scroller)
+            box.append(source)
+            dialog.set_child(box)
             self._close_on_escape(dialog)
             self._summary_dialog = dialog
             heuristic = copilot_sessions.summarize(records, cwd)
             llm_config = self.options.native_config.assistant.llm
+            endpoint = copilot_llm.endpoint_label(llm_config)
             if not llm_config.allow_remote_context:
                 label.set_text(heuristic)
+                source.set_text("heuristic summary · remote off")
                 dialog.present()
                 return
             label.set_text("Summarizing…")
+            source.set_text(endpoint)
             dialog.present()
             recent = [r.cmd for r in records if r.cmd]
             project = os.path.basename(cwd.rstrip("/")) if cwd else None
@@ -3806,10 +3828,17 @@ def build_native_classes(g):
                     text = copilot_llm.summarize(
                         llm_config, cwd=cwd, project=project,
                         recent_commands=recent)
+                    origin = endpoint
                 except copilot_llm.LlmError:
                     text = heuristic
-                GLib.idle_add(lambda: (label.set_text(text or heuristic),
-                                       GLib.SOURCE_REMOVE)[1])
+                    origin = f"heuristic summary · {endpoint} unreachable"
+
+                def apply():
+                    label.set_text(text or heuristic)
+                    source.set_text(origin)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(apply)
 
             threading.Thread(target=work, daemon=True).start()
 

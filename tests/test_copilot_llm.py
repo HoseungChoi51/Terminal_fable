@@ -214,6 +214,48 @@ class ErrorHandlingTests(unittest.TestCase):
             cllm.suggest_commands(_cfg(), query="x", opener=opener)
 
 
+class EndpointLabelTests(unittest.TestCase):
+    def test_openai(self):
+        self.assertEqual(cllm.endpoint_label(_cfg(model="gpt-4.1")),
+                         "gpt-4.1 @ api.openai.com")
+
+    def test_local_ollama(self):
+        cfg = _cfg(base_url="http://127.0.0.1:11434/v1",
+                   model="qwen3.5:2b")
+        self.assertEqual(cllm.endpoint_label(cfg),
+                         "qwen3.5:2b @ 127.0.0.1:11434")
+
+    def test_office_server(self):
+        cfg = _cfg(base_url="http://192.168.210.210:8080/v1", model="served")
+        self.assertEqual(cllm.endpoint_label(cfg),
+                         "served @ 192.168.210.210:8080")
+
+    def test_unparseable_base_url_falls_back(self):
+        cfg = _cfg(base_url="not-a-url", model="m")
+        self.assertEqual(cllm.endpoint_label(cfg), "m @ not-a-url")
+
+
+class SystemSuffixTests(unittest.TestCase):
+    def test_suffix_appended_to_all_paths(self):
+        cfg = _cfg(system_suffix="/no_think")
+        opener = FakeOpener()
+        cllm.suggest_commands(cfg, query="x", opener=opener)
+        self.assertTrue(opener.last_body()["messages"][0]["content"]
+                        .endswith("/no_think"))
+        cllm.summarize(cfg, recent_commands=["ls"], opener=opener)
+        self.assertTrue(opener.last_body()["messages"][0]["content"]
+                        .endswith("/no_think"))
+        cllm.explain(cfg, "ls", opener=opener)
+        self.assertTrue(opener.last_body()["messages"][0]["content"]
+                        .endswith("/no_think"))
+
+    def test_no_suffix_leaves_system_untouched(self):
+        opener = FakeOpener()
+        cllm.suggest_commands(_cfg(), query="x", opener=opener)
+        self.assertNotIn("/no_think",
+                         opener.last_body()["messages"][0]["content"])
+
+
 class SourceGuardrailTests(unittest.TestCase):
     def test_urllib_confined_to_llm_module(self):
         copilot = REPO_ROOT / "agent_terminal" / "copilot"

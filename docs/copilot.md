@@ -76,20 +76,46 @@ OpenAI-compatible server (Ollama, llama.cpp, vLLM) later by config alone.
 
 ### Enabling the assistant
 
-1. Set your key: `export OPENAI_API_KEY=…` (or point `api_key_env` at a
-   different variable).
-2. In `~/.config/agent-terminal/native.json`, turn the gate on and pick
-   a model:
+Turn the gate on in `~/.config/agent-terminal/native.json` and pick an
+endpoint. The assistant panel and the summary dialog always display
+**which server and model** the copilot is talking to (`model @ host`),
+so you can tell at a glance which of your endpoints is active.
 
-   ```json
-   { "assistant": { "llm": {
-       "allow_remote_context": true,
-       "model": "gpt-4.1"
-   } } }
-   ```
+**OpenAI cloud** (needs `export OPENAI_API_KEY=…`):
 
-3. For a local model later, add `"base_url": "http://localhost:11434/v1"`
-   (Ollama) and set `model` to the served model; the key can be omitted.
+```json
+{ "assistant": { "llm": {
+    "allow_remote_context": true,
+    "model": "gpt-4.1"
+} } }
+```
+
+**Local Ollama** (`~/local-llm`, no key; Qwen models default to thinking
+mode — `/no_think` in the system suffix disables it on the
+OpenAI-compatible endpoint):
+
+```json
+{ "assistant": { "llm": {
+    "allow_remote_context": true,
+    "base_url": "http://127.0.0.1:11434/v1",
+    "model": "qwen3.5:4b",
+    "system_suffix": "/no_think"
+} } }
+```
+
+**Office server** (no key, office network only):
+
+```json
+{ "assistant": { "llm": {
+    "allow_remote_context": true,
+    "base_url": "http://192.168.210.210:8080/v1",
+    "model": "default"
+} } }
+```
+
+Config changes apply to newly opened windows. If the endpoint is down or
+unreachable, the panel shows the error and summaries fall back to the
+heuristic text (labeled as such).
 
 Later phases (context-aware suggestions, ghost text) are described in
 the development plan.
@@ -187,6 +213,7 @@ missing or invalid values fall back to the defaults shown here:
 - `llm.allow_remote_context` — master gate; nothing goes to the model unless true.
 - `llm.base_url` / `llm.model` / `llm.api_key_env` — endpoint, model, and key variable.
 - `llm.send_output` — also send redacted command output as context (default off).
+- `llm.system_suffix` — appended to the system prompt (endpoint quirks, e.g. `/no_think`).
 - `llm.timeout_s` — per-request timeout.
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
 
