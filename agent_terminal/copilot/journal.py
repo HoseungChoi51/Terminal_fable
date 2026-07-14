@@ -93,8 +93,15 @@ class PaneJournal:
         self.integration = INTEGRATION_NONE
         self.state = "idle"           # idle | prompt | executing
         self.paused = False
+        self.last_activity = None     # monotonic time of the last batch
         self._seq = itertools.count(1)
         self._pending: _Pending | None = None
+
+    def idle_seconds(self, now):
+        """Seconds since the last command activity, or None if never active."""
+        if self.last_activity is None:
+            return None
+        return max(now - self.last_activity, 0.0)
 
     # -- event intake ----------------------------------------------------
 
@@ -108,6 +115,7 @@ class PaneJournal:
         """
         if self.paused:
             return
+        self.last_activity = timestamp
         ordered = sorted(events, key=lambda e: _EVENT_ORDER.get(e[0], 99))
         for name, value in ordered:
             if name == PREEXEC:

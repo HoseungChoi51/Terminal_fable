@@ -1196,8 +1196,8 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-menu", "copilot-panel", "copilot-pause", "copilot-debug",
-    "copilot-sessions",
+    "copilot-menu", "copilot-panel", "copilot-pause", "copilot-summary",
+    "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "quit",
 )
 
@@ -3103,12 +3103,16 @@ def build_native_classes(g):
             dead_keys.connect("key-pressed", self._on_dead_key)
             self.add_controller(dead_keys)
             self._completion_popover = None
+            self._summary_dialog = None
+            self._resume_prompted = False
             self._session_checkpoint_id = None
-            if self._app.session_store is not None:
-                # Periodic checkpoint so a crash or kill still leaves a
-                # session on disk; normal closes flush eagerly below.
+            assistant = options.native_config.assistant
+            if (self._app.session_store is not None
+                    or (assistant.enabled and assistant.resume.enabled)):
+                # Periodic tick: checkpoint sessions (crash safety) and
+                # offer a resume summary once the pane has gone idle.
                 self._session_checkpoint_id = GLib.timeout_add_seconds(
-                    SESSION_CHECKPOINT_SECONDS, self._checkpoint_sessions)
+                    SESSION_CHECKPOINT_SECONDS, self._session_tick)
                 self.connect("close-request", self._on_close_request)
             self._open_initial_tabs()
 
@@ -3144,6 +3148,7 @@ def build_native_classes(g):
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
             view.append("Assistant Panel…", "win.copilot-panel")
+            view.append("Session Summary…", "win.copilot-summary")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
@@ -3311,8 +3316,9 @@ def build_native_classes(g):
                 for pane in tab.panes.values():
                     self.flush_pane_session(pane)
 
-        def _checkpoint_sessions(self):
+        def _session_tick(self):
             self.flush_all_sessions()
+            self._maybe_prompt_resume()
             return GLib.SOURCE_CONTINUE
 
         def insert_into_active_terminal(self, text):
@@ -3651,6 +3657,8 @@ def build_native_classes(g):
                 self.show_completion_menu()
             elif name == "copilot-panel":
                 self.show_intent_panel()
+            elif name == "copilot-summary":
+                self.show_session_summary()
             elif name == "copilot-pause":
                 self.toggle_copilot_pause()
             elif name == "copilot-debug":
@@ -3721,7 +3729,7 @@ def build_native_classes(g):
             self._flash_pane(pane, "Copilot paused" if journal.paused
                              else "Copilot resumed")
 
-        def _flash_pane(self, pane, text):
+        def _flash_pane(self, pane, text, duration=1100):
             """Briefly show a quiet chip over a terminal pane (no focus grab)."""
             anchor = getattr(pane, "terminal", None)
             if anchor is None:
@@ -3740,7 +3748,99 @@ def build_native_classes(g):
                 popover.unparent()
                 return GLib.SOURCE_REMOVE
 
-            GLib.timeout_add(1100, dismiss)
+            GLib.timeout_add(duration, dismiss)
+
+        def _recent_terminal_pane(self):
+            tab = self.active_tab()
+            if tab is None:
+                return None
+            pane = tab.panes.get(tab._recent_terminal_id)
+            if pane is None or pane.kind != "terminal":
+                pane = next((p for p in tab.panes.values()
+                             if p.kind == "terminal"), None)
+            return pane
+
+        def show_session_summary(self):
+            """Summarize the recent terminal session (LLM-polished if on)."""
+            pane = self._recent_terminal_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None or not journal.snapshot():
+                return
+            records = journal.snapshot()
+            try:
+                cwd = pane.current_directory()
+            except Exception:
+                cwd = None
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_title("Session Summary")
+            dialog.set_default_size(460, 260)
+            label = Gtk.Label()
+            label.set_wrap(True)
+            label.set_xalign(0.0)
+            label.set_yalign(0.0)
+            label.set_margin_top(16)
+            label.set_margin_bottom(16)
+            label.set_margin_start(16)
+            label.set_margin_end(16)
+            label.set_selectable(True)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_child(label)
+            dialog.set_child(scroller)
+            self._close_on_escape(dialog)
+            self._summary_dialog = dialog
+            heuristic = copilot_sessions.summarize(records, cwd)
+            llm_config = self.options.native_config.assistant.llm
+            if not llm_config.allow_remote_context:
+                label.set_text(heuristic)
+                dialog.present()
+                return
+            label.set_text("Summarizing…")
+            dialog.present()
+            recent = [r.cmd for r in records if r.cmd]
+            project = os.path.basename(cwd.rstrip("/")) if cwd else None
+
+            def work():
+                try:
+                    text = copilot_llm.summarize(
+                        llm_config, cwd=cwd, project=project,
+                        recent_commands=recent)
+                except copilot_llm.LlmError:
+                    text = heuristic
+                GLib.idle_add(lambda: (label.set_text(text or heuristic),
+                                       GLib.SOURCE_REMOVE)[1])
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _resume_due(self):
+            """Has the recent terminal gone idle after meaningful work?"""
+            assistant = self.options.native_config.assistant
+            if not (assistant.enabled and assistant.resume.enabled):
+                return False
+            pane = self._recent_terminal_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return False
+            idle = journal.idle_seconds(time.monotonic())
+            threshold = max(assistant.resume.idle_minutes, 1) * 60
+            if idle is None or idle < threshold:
+                return False
+            return copilot_sessions.is_meaningful(journal.snapshot())
+
+        def _maybe_prompt_resume(self):
+            if not self._resume_due():
+                self._resume_prompted = False   # reset once active again
+                return
+            # Only nag the window the user is actually looking at, and only
+            # once per idle period.
+            if self._resume_prompted or not self.is_active():
+                return
+            self._resume_prompted = True
+            self._flash_pane(
+                self._recent_terminal_pane(),
+                "Idle here a while — View ▸ Session Summary recaps it",
+                duration=4500)
 
         def show_completion_menu(self):
             pane = self._active_pane()

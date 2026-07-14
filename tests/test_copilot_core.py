@@ -228,6 +228,14 @@ class JournalTests(unittest.TestCase):
         self.run_command()
         self.assertEqual(len(self.journal.records), 0)
 
+    def test_idle_seconds_tracks_last_activity(self):
+        self.assertIsNone(self.journal.idle_seconds(100.0))
+        self.journal.apply_batch([(cjournal.PRECMD, None)],
+                                 timestamp=50.0, wall_time=1000.0,
+                                 cursor_row=0)
+        self.assertEqual(self.journal.idle_seconds(50.0), 0.0)
+        self.assertEqual(self.journal.idle_seconds(110.0), 60.0)
+
     def test_records_are_redacted(self):
         self.run_command(cmd="export TOKEN=abc123secret",
                          lines=("PASSWORD=leaked1", "ok line", "x"))
