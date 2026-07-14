@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
 from agent_terminal.copilot import llm as copilot_llm
+from agent_terminal.copilot import prompt as copilot_prompt
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
@@ -1437,6 +1438,8 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .copilot-desc { font-size: 0.82em; color: alpha(currentColor, 0.6); }
 .copilot-flash { background-color: alpha(#1c2128, 0.9); color: #d8dee9;
                  font-size: 0.85em; padding: 3px 14px; border-radius: 8px; }
+/* Inline ghost completion: dim, no background, on the terminal grid. */
+.ghost-text { opacity: 0.42; }
 /* Risk badges, quiet to loud. */
 .risk-badge { font-size: 0.72em; padding: 0 6px; margin-left: 8px;
               border-radius: 6px; }
@@ -1648,6 +1651,10 @@ def build_native_classes(g):
             self._flush_id = None
             self._pending_title = None
             self._title_policy = None
+            self._tracker = None
+            self._ghost_label = None
+            self._ghost_suffix = ""
+            self._ghost_dismissed = False
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1667,6 +1674,9 @@ def build_native_classes(g):
                 if self.journal is not None and assistant.titles.enabled:
                     self._title_policy = copilot_titles.TitlePolicy(
                         assistant.titles.min_interval_s)
+                if (self.journal is not None
+                        and assistant.suggestions.ghost_text):
+                    self._tracker = copilot_prompt.PromptTracker()
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -1678,6 +1688,8 @@ def build_native_classes(g):
             scroller.set_hexpand(True)
             scroller.set_vexpand(True)
             self.widget = scroller
+            if self._tracker is not None:
+                self.widget = self._build_ghost_overlay(scroller, settings)
             self._spawn(command, working_directory, control_socket_path,
                         extra_env)
 
@@ -1892,6 +1904,14 @@ def build_native_classes(g):
                     cursor_row=row, read_rows=self._read_rows)
                 if len(self.journal.records) != before:
                     self._maybe_update_title()
+                if self._tracker is not None:
+                    names = [name for name, _ in events]
+                    if copilot_journal.PREEXEC in names:
+                        self._tracker.on_preexec()
+                    if copilot_journal.PRECMD in names:
+                        self._tracker.on_precmd()
+                    self._ghost_dismissed = False
+                    self._refresh_ghost()
             # Resolve a deferred title now that journal state is current
             # (see _on_title_signal): a title set while a command runs is
             # a program title and wins; one set at the prompt is shell
@@ -1923,6 +1943,129 @@ def build_native_classes(g):
             except TypeError:
                 data = text.encode("utf-8")
                 self.terminal.feed_child(data, len(data))
+
+        # -- ghost text (copilot P4) -------------------------------------
+
+        def _build_ghost_overlay(self, scroller, settings):
+            """Wrap the terminal so a dim completion can float at the cursor."""
+            label = Gtk.Label()
+            label.set_halign(Gtk.Align.START)
+            label.set_valign(Gtk.Align.START)
+            label.set_can_target(False)
+            label.set_visible(False)
+            label.add_css_class("ghost-text")
+            attrs = Pango.AttrList()
+            font = Pango.FontDescription()
+            font.set_family(settings.font_family)
+            font.set_size(int(clamp_font_size(settings.font_size)
+                              * Pango.SCALE))
+            attrs.insert(Pango.attr_font_desc_new(font))
+            label.set_attributes(attrs)
+            self._ghost_label = label
+            overlay = Gtk.Overlay()
+            overlay.set_child(scroller)
+            overlay.add_overlay(label)
+            self.terminal.connect("commit", self._on_commit)
+            self.terminal.connect("contents-changed",
+                                  lambda *_: self._refresh_ghost())
+            focus = Gtk.EventControllerFocus()
+            focus.connect("leave", lambda *_: self._hide_ghost())
+            self.terminal.add_controller(focus)
+            self.terminal.get_vadjustment().connect(
+                "value-changed", lambda *_: self._hide_ghost())
+            keys = Gtk.EventControllerKey()
+            keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            keys.connect("key-pressed", self._on_ghost_key)
+            self.terminal.add_controller(keys)
+            return overlay
+
+        def _on_commit(self, terminal, text, size):
+            if self._tracker is None:
+                return
+            self._ghost_dismissed = False
+            self._tracker.on_commit(text)
+            self._refresh_ghost()
+
+        def _ghost_visible(self):
+            return (self._ghost_label is not None
+                    and self._ghost_label.get_visible())
+
+        def _hide_ghost(self):
+            # Just hide the overlay — do NOT touch tracker state. The
+            # screen cross-check in _refresh_ghost is what guards against
+            # drift; the tracker only goes DIRTY on genuinely off-model
+            # input (control chars, handled in PromptTracker.on_commit).
+            if self._ghost_label is not None and self._ghost_label.get_visible():
+                self._ghost_label.set_visible(False)
+            self._ghost_suffix = ""
+
+        def _refresh_ghost(self):
+            label = self._ghost_label
+            if label is None or self._ghost_dismissed:
+                return
+            typed = self._tracker.typed_prefix()
+            if not typed:
+                if label.get_visible():
+                    label.set_visible(False)
+                self._ghost_suffix = ""
+                return
+            # Cross-check the tracker against the real screen: the current
+            # row up to the cursor must actually end with what we think was
+            # typed, or we have drifted and must not guess.
+            col, row = self.terminal.get_cursor_position()
+            line = self._read_rows(row, row + 1)
+            visible = line[0][:col] if line else ""
+            if not visible.endswith(typed):
+                self._hide_ghost()
+                return
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            suffix = copilot_suggest.ghost_completion(
+                typed, history=history,
+                min_confidence=self.assistant.suggestions.min_confidence)
+            if not suffix:
+                if label.get_visible():
+                    label.set_visible(False)
+                self._ghost_suffix = ""
+                return
+            self._ghost_suffix = suffix
+            label.set_text(suffix)
+            self._position_ghost(col, row)
+            label.set_visible(True)
+
+        def _position_ghost(self, col, row):
+            try:
+                cw = self.terminal.get_char_width()
+                ch = self.terminal.get_char_height()
+                top = self.terminal.get_vadjustment().get_value()
+            except Exception:
+                return
+            self._ghost_label.set_margin_start(int(col * cw))
+            self._ghost_label.set_margin_top(int((row - top) * ch))
+
+        def _on_ghost_key(self, controller, keyval, keycode, state):
+            if not self._ghost_visible():
+                return False
+            name = Gdk.keyval_name(keyval) or ""
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if name == "Escape":
+                self._ghost_dismissed = True
+                self._hide_ghost()
+                return True
+            if name == "Right" and (ctrl or not (state & (
+                    Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK))):
+                self._accept_ghost()
+                return True
+            return False
+
+        def _accept_ghost(self):
+            suffix = self._ghost_suffix
+            if not suffix:
+                return
+            self._ghost_label.set_visible(False)
+            self._ghost_suffix = ""
+            # feed_child fires the "commit" signal, so the tracker absorbs
+            # the accepted suffix through _on_commit — no manual accept().
+            self.insert_text(suffix)
 
         def build_session(self, config, now):
             """Build a storable session from this pane's journal, or None."""
