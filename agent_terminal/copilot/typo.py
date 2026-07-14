@@ -76,23 +76,27 @@ def path_commands(path_env=None, *, scandir=scan_directory) -> frozenset:
 
 
 def _edit_distance(a, b, cap=_MAX_EDITS):
-    """Levenshtein distance, short-circuiting above `cap`."""
-    if abs(len(a) - len(b)) > cap:
+    """Damerau OSA distance (transposition = 1 edit), capped for speed."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > cap:
         return cap + 1
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        current = [i]
+    prev2 = None
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        current = [i] + [0] * lb
         best = i
-        for j, cb in enumerate(b, 1):
-            cost = 0 if ca == cb else 1
-            value = min(previous[j] + 1, current[j - 1] + 1,
-                        previous[j - 1] + cost)
-            current.append(value)
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            value = min(prev[j] + 1, current[j - 1] + 1, prev[j - 1] + cost)
+            if (i > 1 and j > 1 and a[i - 1] == b[j - 2]
+                    and a[i - 2] == b[j - 1]):
+                value = min(value, prev2[j - 2] + 1)
+            current[j] = value
             best = min(best, value)
         if best > cap:
             return cap + 1
-        previous = current
-    return previous[-1]
+        prev2, prev = prev, current
+    return prev[lb]
 
 
 def nearest_command(word, known):
@@ -146,8 +150,11 @@ def correct_command(line, *, known=frozenset(), history=()) -> Correction | None
     # First token: mistyped command name (skip if it's a path).
     head = tokens[0]
     if "/" not in head and head not in known:
+        # The just-failed command is often already in history; exclude it
+        # so it is not mistaken for a valid target.
         candidates = set(known)
-        candidates.update(b for b in (command_base(h) for h in history) if b)
+        candidates.update(b for b in (command_base(h) for h in history)
+                          if b and b != head)
         fixed = nearest_command(head, candidates)
         if fixed and fixed != head:
             tokens[0] = fixed

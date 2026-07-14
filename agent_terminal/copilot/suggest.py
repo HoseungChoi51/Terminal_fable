@@ -38,6 +38,14 @@ class Suggestion:
     description: str = ""
 
 
+def make_suggestion(command, label, *, source="context", score=5.0,
+                    description=""):
+    """Build a risk-classified Suggestion (for context/typo sources)."""
+    return Suggestion(command=command, label=label, source=source,
+                      risk=risk_mod.classify(command), score=score,
+                      description=description)
+
+
 def _dedupe_history(commands):
     """Most-recent-first unique commands, dropping trivial ones."""
     seen = set()

@@ -210,6 +210,12 @@ class TypoTests(unittest.TestCase):
     def test_no_change_returns_none(self):
         self.assertIsNone(ctypo.correct_command("ls -la", known=self.known))
 
+    def test_failed_typo_in_history_still_corrected(self):
+        # the just-failed command is in history; it must not count as valid
+        c = ctypo.correct_command("rysnc", known=self.known,
+                                  history=["rysnc", "ls"])
+        self.assertEqual(c.corrected, "rsync")
+
     def test_path_command_not_touched(self):
         self.assertIsNone(
             ctypo.correct_command("./rysnc", known=self.known))

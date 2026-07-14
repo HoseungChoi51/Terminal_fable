@@ -14,8 +14,8 @@ import os
 import shlex
 from dataclasses import dataclass
 
-from agent_terminal.copilot import risk as risk_mod
-from agent_terminal.copilot.suggest import Suggestion
+from agent_terminal.copilot import fuzzy
+from agent_terminal.copilot.suggest import Suggestion, make_suggestion
 from agent_terminal.tui_core import scan_directory
 
 # -- project detection --------------------------------------------------
@@ -317,11 +317,6 @@ def ssh_hosts(config_path=None):
 
 # -- assembling menu suggestions ----------------------------------------
 
-def _context_suggestion(command, label, score):
-    return Suggestion(command=command, label=label, source="context",
-                      risk=risk_mod.classify(command), score=score)
-
-
 def menu_suggestions(line, cwd, *, project=None, readme_blocks=(),
                      scandir=scan_directory, providers=None,
                      limit=8) -> list[Suggestion]:
@@ -338,7 +333,7 @@ def menu_suggestions(line, cwd, *, project=None, readme_blocks=(),
     def add(command, label, score):
         if command and command not in seen:
             seen.add(command)
-            out.append(_context_suggestion(command, label, score))
+            out.append(make_suggestion(command, label, score=score))
 
     # Argument-aware completions.
     if spec.kind in (DIRS, FILES, ARCHIVES, MEDIA, DEB):
@@ -356,12 +351,19 @@ def menu_suggestions(line, cwd, *, project=None, readme_blocks=(),
                 continue
             add(spec.prefix + value, label, 6.0)
 
-    # Project run commands (README preferred), shown when starting fresh.
-    if not spec.partial or spec.kind == NONE:
-        readme = readme_run_commands(readme_blocks)
-        for cmd in readme:
-            add(cmd, "from README", 5.5)
+    # Project run commands (README preferred), shown only while typing a
+    # bare command (not while completing an argument), filtered by it.
+    if spec.kind == NONE:
+        query = spec.partial
+
+        def matches(cmd):
+            return not query or fuzzy.score(query, cmd) is not None
+
+        for cmd in readme_run_commands(readme_blocks):
+            if matches(cmd):
+                add(cmd, "from README", 5.5)
         for cmd in project_run_commands(project, cwd=cwd, scandir=scandir):
-            add(cmd, "project", 5.0)
+            if matches(cmd):
+                add(cmd, "project", 5.0)
 
     return out[:limit]

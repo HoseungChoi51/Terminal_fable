@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -35,8 +36,10 @@ from agent_terminal.copilot import prompt as copilot_prompt
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
+from agent_terminal.copilot import context as copilot_context
 from agent_terminal.copilot import suggest as copilot_suggest
 from agent_terminal.copilot import titles as copilot_titles
+from agent_terminal.copilot import typo as copilot_typo
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -1462,6 +1465,20 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 
 SESSION_CHECKPOINT_SECONDS = 60
 
+_known_commands_cache = None
+
+
+def known_commands():
+    """Process-wide cache of PATH executable names (for typo correction)."""
+    global _known_commands_cache
+    if _known_commands_cache is None:
+        try:
+            _known_commands_cache = copilot_typo.path_commands()
+        except Exception:
+            _known_commands_cache = frozenset()
+    return _known_commands_cache
+
+
 _pane_ids = itertools.count(1)
 
 
@@ -1655,6 +1672,7 @@ def build_native_classes(g):
             self._ghost_label = None
             self._ghost_suffix = ""
             self._ghost_dismissed = False
+            self._correction_popover = None
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1674,9 +1692,12 @@ def build_native_classes(g):
                 if self.journal is not None and assistant.titles.enabled:
                     self._title_policy = copilot_titles.TitlePolicy(
                         assistant.titles.min_interval_s)
-                if (self.journal is not None
-                        and assistant.suggestions.ghost_text):
+                if self.journal is not None:
+                    # The tracker runs whenever we journal (it feeds both
+                    # ghost text and the menu's typed-line awareness); only
+                    # the visible overlay is gated on ghost_text.
                     self._tracker = copilot_prompt.PromptTracker()
+                    self.terminal.connect("commit", self._on_commit)
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -1688,7 +1709,8 @@ def build_native_classes(g):
             scroller.set_hexpand(True)
             scroller.set_vexpand(True)
             self.widget = scroller
-            if self._tracker is not None:
+            if (self._tracker is not None
+                    and assistant.suggestions.ghost_text):
                 self.widget = self._build_ghost_overlay(scroller, settings)
             self._spawn(command, working_directory, control_socket_path,
                         extra_env)
@@ -1904,6 +1926,7 @@ def build_native_classes(g):
                     cursor_row=row, read_rows=self._read_rows)
                 if len(self.journal.records) != before:
                     self._maybe_update_title()
+                    self._maybe_show_correction()
                 if self._tracker is not None:
                     names = [name for name, _ in events]
                     if copilot_journal.PREEXEC in names:
@@ -1944,6 +1967,60 @@ def build_native_classes(g):
                 data = text.encode("utf-8")
                 self.terminal.feed_child(data, len(data))
 
+        # -- "did you mean" correction chip (copilot P3) -----------------
+
+        def _maybe_show_correction(self):
+            if (self.assistant is None
+                    or not self.assistant.suggestions.typo_correction):
+                return
+            record = self.journal.last_record()
+            if record is None or record.exit_code != 127 or not record.cmd:
+                return
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            correction = copilot_typo.correct_command(
+                record.cmd, known=known_commands(), history=history)
+            # A fix that introduces real danger stays out of one-click
+            # paths (design doc 5.5) — offer it only in the menu.
+            if (correction is None or correction.reason != "command"
+                    or correction.escalates_risk):
+                return
+            self._show_correction_chip(correction.corrected)
+
+        def _show_correction_chip(self, corrected):
+            if getattr(self, "_correction_popover", None) is not None:
+                self._correction_popover.popdown()
+            popover = Gtk.Popover()
+            self._correction_popover = popover
+            popover.set_parent(self.terminal)
+            popover.set_autohide(False)
+            popover.set_position(Gtk.PositionType.TOP)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.add_css_class("copilot-flash")
+            box.append(Gtk.Label(label="Did you mean"))
+            cmd = Gtk.Label(label=corrected)
+            cmd.add_css_class("copilot-cmd")
+            box.append(cmd)
+            insert = Gtk.Button(label="Insert")
+            insert.add_css_class("chip-button")
+            box.append(insert)
+            popover.set_child(box)
+
+            def dismiss():
+                if getattr(self, "_correction_popover", None) is popover:
+                    self._correction_popover = None
+                popover.popdown()
+                popover.unparent()
+                return GLib.SOURCE_REMOVE
+
+            def on_insert(_button):
+                self.insert_text(corrected)
+                self.terminal.grab_focus()
+                dismiss()
+
+            insert.connect("clicked", on_insert)
+            popover.popup()
+            GLib.timeout_add_seconds(8, dismiss)
+
         # -- ghost text (copilot P4) -------------------------------------
 
         def _build_ghost_overlay(self, scroller, settings):
@@ -1965,7 +2042,6 @@ def build_native_classes(g):
             overlay = Gtk.Overlay()
             overlay.set_child(scroller)
             overlay.add_overlay(label)
-            self.terminal.connect("commit", self._on_commit)
             self.terminal.connect("contents-changed",
                                   lambda *_: self._refresh_ghost())
             focus = Gtk.EventControllerFocus()
@@ -4036,6 +4112,23 @@ def build_native_classes(g):
             recipes = (copilot_recipes.BUILTIN_RECIPES
                        if self.options.native_config.assistant.recipes.enabled
                        else ())
+            # Gather context once, on open (no background scanning).
+            typed = ""
+            tracker = getattr(pane, "_tracker", None)
+            if tracker is not None:
+                typed = tracker.typed_prefix() or ""
+            cwd = self._active_terminal_cwd()
+            project = copilot_context.detect_project(cwd) if cwd else None
+            readme_blocks = self._read_readme(cwd)
+            providers = {copilot_context.SSH_HOSTS: copilot_context.ssh_hosts()}
+            if project is not None and ".git" in project.files:
+                providers[copilot_context.BRANCHES] = self._git_lines(
+                    cwd, ["branch", "--format=%(refname:short)"])
+                providers[copilot_context.CHANGED_FILES] = [
+                    line[3:] for line in self._git_lines(
+                        cwd, ["status", "--porcelain"]) if len(line) > 3]
+            typo_enabled = (self.options.native_config.assistant
+                            .suggestions.typo_correction)
             if self._completion_popover is not None:
                 self._completion_popover.popdown()
 
@@ -4066,8 +4159,11 @@ def build_native_classes(g):
                     nxt = child.get_next_sibling()
                     listbox.remove(child)
                     child = nxt
-                for suggestion in copilot_suggest.build_suggestions(
-                        query, recipes=recipes, history=history):
+                for suggestion in self._gather_menu_suggestions(
+                        query, cwd=cwd, project=project,
+                        readme_blocks=readme_blocks, providers=providers,
+                        history=history, recipes=recipes,
+                        typo_enabled=typo_enabled):
                     listbox.append(self._suggestion_row(suggestion))
                 first = listbox.get_row_at_index(0)
                 if first is not None:
@@ -4078,7 +4174,7 @@ def build_native_classes(g):
                 if suggestion is None:
                     return
                 popover.popdown()
-                self._accept_suggestion(pane, suggestion)
+                self._accept_suggestion(pane, suggestion, typed)
 
             entry.connect("search-changed",
                           lambda e: populate(e.get_text()))
@@ -4106,9 +4202,63 @@ def build_native_classes(g):
                 pane.focus()
 
             popover.connect("closed", on_closed)
-            populate("")
+            entry.set_text(typed)             # seed with the current line
+            entry.set_position(-1)
+            populate(typed)
             popover.popup()
             entry.grab_focus()
+
+        def _gather_menu_suggestions(self, query, *, cwd, project,
+                                     readme_blocks, providers, history,
+                                     recipes, typo_enabled, limit=12):
+            """Merge typo, context, and fuzzy suggestions for the menu."""
+            merged, seen = [], set()
+
+            def take(items):
+                for suggestion in items:
+                    if suggestion.command not in seen:
+                        seen.add(suggestion.command)
+                        merged.append(suggestion)
+
+            if typo_enabled and query.strip():
+                correction = copilot_typo.correct_command(
+                    query, known=known_commands(), history=history)
+                if correction is not None and correction.reason == "command":
+                    take([copilot_suggest.make_suggestion(
+                        correction.corrected, "did you mean", score=9.0)])
+            take(copilot_context.menu_suggestions(
+                query, cwd, project=project, readme_blocks=readme_blocks,
+                providers=providers))
+            take(copilot_suggest.build_suggestions(
+                query, recipes=recipes, history=history))
+            return merged[:limit]
+
+        def _read_readme(self, cwd):
+            if not cwd:
+                return ()
+            for name in ("README.md", "README", "README.rst", "readme.md",
+                         "Readme.md"):
+                try:
+                    text = Path(cwd, name).read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                return parse_markdown_blocks(text)
+            return ()
+
+        def _git_lines(self, cwd, args):
+            if not cwd:
+                return []
+            try:
+                result = subprocess.run(
+                    ["git", "-C", cwd, *args], capture_output=True,
+                    text=True, timeout=1.5)
+            except (OSError, subprocess.SubprocessError):
+                return []
+            if result.returncode != 0:
+                return []
+            return [line.strip() for line in result.stdout.splitlines()
+                    if line.strip()]
 
         def _accept_suggestion(self, pane, suggestion, typed=""):
             """Insert a chosen command; never with a trailing newline."""
