@@ -27,7 +27,7 @@
 | Auto tab titles | automatic | `project: command`; damped; program titles (vim/ssh) win while running |
 | Session history | **Ctrl+Shift+S** | Restore = new tab at last cwd + summary pane; "Insert last command" types, never runs |
 | Command menu | **Ctrl+Shift+Space** | Recipes + your history, fuzzy search, risk badges; Enter inserts **without newline** |
-| Assistant panel | **Ctrl+Shift+P** | Natural language → command templates (insert/copy/explain); needs the LLM gate on |
+| Assistant panel | **Ctrl+Shift+P** | Natural language → command templates (insert/copy/explain); needs the LLM gate on; one per tab — repeat press jumps to it |
 | Session summary | **View ▸ Session Summary…** | LLM-polished when remote is on, heuristic otherwise; footer names the source |
 | Idle resume chip | automatic | After `resume.idle_minutes` of idleness following real work |
 | Pause one pane | **Alt+Shift+A** | Stops journaling + menu for that pane; toggle to resume |

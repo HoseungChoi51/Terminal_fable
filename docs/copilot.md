@@ -62,7 +62,8 @@ language model, both **off by default** and gated:
   a goal in plain language ("split a video into frames"), and get back
   command templates with `<placeholder>` slots and risk badges. Each can
   be **inserted** onto your prompt (never run), **copied**, or
-  **explained**.
+  **explained**. Each tab has at most one panel: pressing Ctrl+Shift+P
+  again jumps to it (close it like any pane, Ctrl+Shift+W).
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.

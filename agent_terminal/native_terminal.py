@@ -3701,6 +3701,13 @@ def build_native_classes(g):
             tab = self.active_tab()
             if tab is None:
                 return
+            # One assistant panel per tab: a second Ctrl+Shift+P jumps to
+            # the existing panel instead of stacking another one.
+            existing = next((p for p in tab.panes.values()
+                             if p.kind == "intent"), None)
+            if existing is not None:
+                tab.set_active(existing.pane_id, focus=True)
+                return
             pane = IntentPane(
                 config=self.options.native_config.assistant.llm,
                 gather_context=self._assistant_context,
@@ -3934,12 +3941,26 @@ def build_native_classes(g):
                           lambda e: populate(e.get_text()))
             entry.connect("activate",
                           lambda e: accept(listbox.get_selected_row()))
+            # Gtk.SearchEntry consumes Escape as "stop-search", so the
+            # popover's own Escape handling never sees it; close explicitly.
+            entry.connect("stop-search", lambda e: popover.popdown())
             listbox.connect("row-activated", lambda box, row: accept(row))
+            escape = Gtk.EventControllerKey()
+
+            def on_escape(controller, keyval, keycode, state):
+                if Gdk.keyval_name(keyval) == "Escape":
+                    popover.popdown()
+                    return True
+                return False
+
+            escape.connect("key-pressed", on_escape)
+            popover.add_controller(escape)
 
             def on_closed(p):
                 p.unparent()
                 if self._completion_popover is p:
                     self._completion_popover = None
+                pane.focus()
 
             popover.connect("closed", on_closed)
             populate("")
