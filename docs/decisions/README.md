@@ -23,4 +23,5 @@ mark the old one `Superseded by NNNN`.
 | [0005](0005-copilot-pure-core-package.md) | Copilot as a pure-core package with a one-way import rule | Accepted |
 | [0006](0006-overlay-ghost-text-no-engine-replacement.md) | Grid-aligned overlay ghost text on VTE; no engine replacement | Accepted |
 | [0007](0007-bash-shell-integration.md) | Bash shell integration via an auto-injected rcfile + termprops | Accepted |
+| [0008](0008-llm-provider-and-remote-gate.md) | LLM provider: OpenAI-compatible, behind a gated redacting choke point | Accepted |
 | [0009](0009-session-persistence-format.md) | Session persistence: a directory per session under the XDG data dir | Accepted |

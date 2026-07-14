@@ -55,8 +55,44 @@ For a hands-on checklist of what to try and what to watch while
 dogfooding this phase, see the
 [P2 test guide](copilot-p2-test-guide.md).
 
-Later phases (context-aware suggestions, ghost text, the LLM intent
-panel) are described in the development plan.
+**Phase P5 — the LLM assistant (shipped).** Two features that use a
+language model, both **off by default** and gated:
+
+- *Intent side panel* — press **Ctrl+Shift+P** to open a panel, describe
+  a goal in plain language ("split a video into frames"), and get back
+  command templates with `<placeholder>` slots and risk badges. Each can
+  be **inserted** onto your prompt (never run), **copied**, or
+  **explained**.
+- *Session summaries* — **View → Session Summary…** recaps what you were
+  doing in the current terminal; when you leave a session idle after
+  real work, a quiet chip points you to it.
+
+The model is reached through a single gated, redacting path (ADR
+[0008](decisions/0008-llm-provider-and-remote-gate.md)): nothing is sent
+unless you turn `assistant.llm.allow_remote_context` on, and everything
+sent is secret-redacted first. The client speaks the OpenAI API against
+a configurable `base_url`, so it works with OpenAI now and a local
+OpenAI-compatible server (Ollama, llama.cpp, vLLM) later by config alone.
+
+### Enabling the assistant
+
+1. Set your key: `export OPENAI_API_KEY=…` (or point `api_key_env` at a
+   different variable).
+2. In `~/.config/agent-terminal/native.json`, turn the gate on and pick
+   a model:
+
+   ```json
+   { "assistant": { "llm": {
+       "allow_remote_context": true,
+       "model": "gpt-4.1"
+   } } }
+   ```
+
+3. For a local model later, add `"base_url": "http://localhost:11434/v1"`
+   (Ollama) and set `model` to the served model; the key can be omitted.
+
+Later phases (context-aware suggestions, ghost text) are described in
+the development plan.
 
 ## How command tracking works
 
@@ -124,7 +160,12 @@ missing or invalid values fall back to the defaults shown here:
     "sessions": {"enabled": true, "retention_days": 30,
                  "exclude_dirs": [], "exclude_commands": [], "store_output": true},
     "suggestions": {"menu": true},
-    "recipes": {"enabled": true}
+    "recipes": {"enabled": true},
+    "llm": {"provider": "openai", "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY",
+            "allow_remote_context": false, "send_output": false,
+            "timeout_s": 30},
+    "resume": {"enabled": true, "idle_minutes": 30}
   }
 }
 ```
@@ -143,6 +184,11 @@ missing or invalid values fall back to the defaults shown here:
 - `sessions.exclude_dirs` — directories whose sessions are never saved.
 - `sessions.exclude_commands` — glob patterns whose commands are dropped before saving.
 - `sessions.store_output` — whether saved sessions keep command output.
+- `llm.allow_remote_context` — master gate; nothing goes to the model unless true.
+- `llm.base_url` / `llm.model` / `llm.api_key_env` — endpoint, model, and key variable.
+- `llm.send_output` — also send redacted command output as context (default off).
+- `llm.timeout_s` — per-request timeout.
+- `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
 (see ADR [0009](decisions/0009-session-persistence-format.md)); every

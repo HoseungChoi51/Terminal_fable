@@ -75,5 +75,6 @@ docs/
     0005-copilot-pure-core-package.md     copilot package + one-way imports
     0006-overlay-ghost-text-no-engine-replacement.md  overlay ghost text
     0007-bash-shell-integration.md        auto-injected rcfile + termprops
+    0008-llm-provider-and-remote-gate.md  OpenAI-compatible client, gated + redacted
     0009-session-persistence-format.md    dir-per-session under XDG data
 ```
