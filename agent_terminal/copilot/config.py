@@ -50,6 +50,7 @@ class RecipesConfig:
 @dataclass(frozen=True)
 class LlmConfig:
     provider: str = "openai"
+    base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4.1-mini"
     api_key_env: str = "OPENAI_API_KEY"
     allow_remote_context: bool = False
