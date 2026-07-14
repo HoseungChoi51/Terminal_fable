@@ -118,8 +118,27 @@ Config changes apply to newly opened windows. If the endpoint is down or
 unreachable, the panel shows the error and summaries fall back to the
 heuristic text (labeled as such).
 
-Later phases (context-aware suggestions, ghost text) are described in
-the development plan.
+**Phase P4 — inline ghost text (shipped, default off).** With
+`assistant.suggestions.ghost_text` on, as you type at the prompt the
+most likely completion from your own history appears as dim text right
+after the cursor, in the terminal's font. Press **Right** (or
+**Ctrl+Right**) to accept it — only the completion is typed in, never a
+newline, so nothing runs — or **Esc** to dismiss it. It shows only at a
+clean prompt and vanishes the moment anything is uncertain (you scroll,
+resize, run a program, use arrows/Ctrl-R/Tab, or the screen no longer
+matches what it thinks you typed). It never completes a destructive,
+privileged, or unknown command. Recipes are included only if you lower
+`suggestions.min_confidence` below `0.7`.
+
+This is the newest and least-proven feature — it is default-off pending
+a dogfooding soak (vim/tmux/paste/resize/wrapped lines). Enable it with:
+
+```json
+{ "assistant": { "suggestions": { "ghost_text": true } } }
+```
+
+Later phases (context-aware suggestions) are described in the
+development plan.
 
 ## How command tracking works
 
@@ -203,6 +222,8 @@ missing or invalid values fall back to the defaults shown here:
 - `journal.store_output` — whether to keep the redacted output tail.
 - `journal.output_tail_lines` — how many trailing output lines to keep.
 - `suggestions.menu` — enable the Ctrl+Shift+Space command menu.
+- `suggestions.ghost_text` — inline history completion at the cursor (default off).
+- `suggestions.min_confidence` — threshold for ghost text (lower to include recipes).
 - `recipes.enabled` — include built-in recipes in the menu.
 - `titles.enabled` — infer tab titles from the journal.
 - `titles.min_interval_s` — minimum seconds between title changes (anti-flicker).

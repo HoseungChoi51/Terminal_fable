@@ -15,7 +15,7 @@
 | P1 titles + sessions | ✅ shipped | Auto `project: command` tab titles; session history/restore |
 | P2 command menu | ✅ shipped | Ctrl+Shift+Space fuzzy menu, risk badges, per-pane pause |
 | P3 context heuristics | ⬜ next | Project/README awareness, argument completion, typo hints (local, no LLM) |
-| P4 ghost text | ⬜ planned | Inline overlay suggestion + prompt tracker (local, no LLM) |
+| P4 ghost text | ✅ shipped (default off) | Inline history completion at the cursor + prompt tracker (local, no LLM) |
 | P5 LLM assistant | ✅ shipped (early, for dogfooding) | Intent panel, session summaries, endpoint indicator |
 | P6 learning/polish | ⬜ planned | Acceptance tracking, personalized ranking |
 
@@ -29,6 +29,7 @@
 | Command menu | **Ctrl+Shift+Space** | Recipes + your history, fuzzy search, risk badges; Enter inserts **without newline** |
 | Assistant panel | **Ctrl+Shift+P** | Natural language → command templates (insert/copy/explain); needs the LLM gate on; one per tab — repeat press jumps to it |
 | Session summary | **View ▸ Session Summary…** | LLM-polished when remote is on, heuristic otherwise; footer names the source |
+| Ghost text | type at prompt | Dim inline completion from your history; **Right**/**Ctrl+Right** accepts, **Esc** dismisses; default off (`suggestions.ghost_text`) |
 | Idle resume chip | automatic | After `resume.idle_minutes` of idleness following real work |
 | Pause one pane | **Alt+Shift+A** | Stops journaling + menu for that pane; toggle to resume |
 

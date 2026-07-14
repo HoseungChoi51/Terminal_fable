@@ -84,7 +84,10 @@ classifier against the design-doc examples, recipe metadata and search, and the
 suggestion merge/rank/insert-plan logic). `tests/test_copilot_llm.py` covers the
 P5 LLM core with a fake opener: the remote gate lets nothing through when off,
 every payload is redacted, request/response shaping and parsing, and a guardrail
-that `urllib` stays confined to `copilot/llm.py`.
+that `urllib` stays confined to `copilot/llm.py`. `tests/test_copilot_prompt.py`
+covers the P4 prompt-line state machine (typing, backspace, control-char/tab/enter
+dirtying, precmd/preexec cycle), and the ghost-completion gate lives in
+`tests/test_copilot_suggest.py`.
 
 Run the unit tests before every commit. They are fast and need no GUI.
 
