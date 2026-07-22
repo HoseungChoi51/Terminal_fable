@@ -21,12 +21,6 @@ case ":${HISTCONTROL:-}:" in
     *) HISTCONTROL="${HISTCONTROL:+$HISTCONTROL:}ignorespace" ;;
 esac
 
-_agentterm_signal() {
-    local errsv="$?"
-    printf '\033]666;%s!\033\\' "$1"
-    return "$errsv"
-}
-
 _agentterm_precmd() {
     local errsv="$?" entry rest b64 cmd out
     entry="$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" || entry=""
@@ -69,7 +63,15 @@ _agentterm_last_hist="$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" \
 
 # PS0 is expanded after a command is read and before it executes
 # (bash >= 4.4); prepend so an existing PS0 keeps working.
-PS0="$(_agentterm_signal vte.shell.preexec)${PS0:-}"
+#
+# Use bash prompt-escape form (\e, \\) rather than pre-expanded escape
+# bytes. If we prepend real bytes ending in "ESC \" and the pre-existing
+# PS0 begins with a literal "\e" (as vte.sh's "\e]133;C…" does), bash's
+# prompt expansion merges our trailing backslash with their leading one
+# (\\ -> \) and eats the ESC that starts their OSC — leaking a "]133;C"
+# fragment on every command. A fully-literal marker expands cleanly at the
+# boundary, so both sequences survive.
+PS0='\e]666;vte.shell.preexec!\e\\'"${PS0:-}"
 
 # Prepend to PROMPT_COMMAND so $? still holds the user command's exit
 # status when our hook runs.
