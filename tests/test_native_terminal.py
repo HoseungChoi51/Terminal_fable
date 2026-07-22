@@ -590,7 +590,7 @@ class ActionTests(unittest.TestCase):
         "copy", "paste", "select-all", "find", "find-next", "find-previous",
         "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
-        "copilot-menu", "copilot-panel", "copilot-pause", "copilot-sessions",
+        "copilot-menu", "copilot-ask", "copilot-pause", "copilot-sessions",
         "copilot-debug",
         "shortcuts", "preferences", "quit",
     )
@@ -619,7 +619,8 @@ class ActionTests(unittest.TestCase):
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
         self.assertIn("<Ctrl><Shift>s", nt.ACCELERATORS["copilot-sessions"])
         self.assertIn("<Ctrl><Shift>space", nt.ACCELERATORS["copilot-menu"])
-        self.assertIn("<Ctrl><Shift>p", nt.ACCELERATORS["copilot-panel"])
+        self.assertIn("<Ctrl>question", nt.ACCELERATORS["copilot-ask"])
+        self.assertIn("<Ctrl><Shift>slash", nt.ACCELERATORS["copilot-ask"])
         self.assertIn("<Alt><Shift>a", nt.ACCELERATORS["copilot-pause"])
 
     def test_copilot_accelerators_not_reserved(self):
@@ -740,6 +741,23 @@ class SourceGuardrailTests(unittest.TestCase):
 
     def test_shortcut_guide_has_dismiss_control(self):
         self.assertIn('Gtk.Button(label="Close")', SOURCE)
+
+    def test_only_one_guarded_submit_byte(self):
+        # Ask mode is the sole place a submit byte (CR) is fed to a shell,
+        # and only under `if run:` (auto-pilot cleared it). Nothing else in
+        # the app may press Enter for the user.
+        cr = 'insert_text("\\r")'
+        self.assertEqual(SOURCE.count(cr), 1,
+                         "exactly one carriage-return feed expected")
+        self.assertIn('if run:\n                pane.insert_text("\\r")',
+                      SOURCE)
+        self.assertNotIn('insert_text("\\n")', SOURCE)
+
+    def test_ask_take_goes_through_can_take(self):
+        # The take path must consult the single-line/risk gate before it
+        # ever inserts a command.
+        self.assertIn("copilot_ask.can_take(", SOURCE)
+        self.assertIn("def _ask_commit(self, pane, command, run)", SOURCE)
 
 
 class PackagingTests(unittest.TestCase):

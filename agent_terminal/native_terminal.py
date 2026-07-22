@@ -40,6 +40,7 @@ from agent_terminal.copilot import context as copilot_context
 from agent_terminal.copilot import suggest as copilot_suggest
 from agent_terminal.copilot import titles as copilot_titles
 from agent_terminal.copilot import typo as copilot_typo
+from agent_terminal.copilot import ask as copilot_ask
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -1200,7 +1201,7 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-menu", "copilot-panel", "copilot-pause", "copilot-summary",
+    "copilot-menu", "copilot-ask", "copilot-pause", "copilot-summary",
     "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "quit",
 )
@@ -1241,10 +1242,13 @@ ACCELERATORS = {
     "zoom-out": ("<Ctrl>minus",),
     "zoom-reset": ("<Ctrl>0",),
     "copilot-menu": ("<Ctrl><Shift>space",),
-    "copilot-panel": ("<Ctrl><Shift>p",),
+    # Ask mode: Ctrl+? (question needs Shift on most layouts); also bind
+    # the raw Ctrl+Shift+/ so it fires regardless of how the layout names
+    # the shifted slash.
+    "copilot-ask": ("<Ctrl>question", "<Ctrl><Shift>slash"),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
-    "shortcuts": ("<Ctrl><Shift>h", "F1", "<Ctrl>question"),
+    "shortcuts": ("<Ctrl><Shift>h", "F1"),
     "preferences": ("<Ctrl>comma",),
     "quit": ("<Ctrl><Shift>q",),
 }
@@ -1454,13 +1458,17 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .risk-destructive { background-color: alpha(#a03a3a, 0.7); color: #fff; }
 .risk-unknown { background-color: alpha(#6a6a6a, 0.4); }
 
-/* Intent side panel (copilot). */
+/* In-place ask overlay + shared card styling (copilot). */
 .intent-endpoint { color: alpha(currentColor, 0.55); font-size: 0.8em;
                    font-family: monospace; }
 .intent-notice { color: alpha(currentColor, 0.7); font-size: 0.88em; }
 .intent-card { background-color: alpha(currentColor, 0.06);
                border-radius: 8px; padding: 8px 10px; }
 .intent-explain { color: alpha(currentColor, 0.72); font-size: 0.85em; }
+.copilot-ask > contents { padding: 8px; }
+.ask-seed { font-family: monospace; font-size: 0.82em;
+            color: alpha(currentColor, 0.6); }
+.ask-question { color: alpha(currentColor, 0.85); font-size: 0.9em; }
 """
 
 SESSION_CHECKPOINT_SECONDS = 60
@@ -2611,225 +2619,6 @@ def build_native_classes(g):
                 return True
             return False
 
-    class IntentPane(ShortcutHintMixin, PaneBase):
-        """Natural-language → command templates via the LLM (copilot P5).
-
-        Describe a goal; the assistant returns risk-labeled command
-        templates you can insert (never run), copy, or explain. All
-        network work happens on a worker thread through the gated,
-        redacting choke point in copilot.llm.
-        """
-
-        kind = "intent"
-
-        def __init__(self, *, config, gather_context, on_insert,
-                     on_activated=None):
-            super().__init__(next_pane_id(), "Assistant")
-            self._config = config
-            self._gather_context = gather_context
-            self._on_insert = on_insert
-            self.on_activated = on_activated
-            self._alive = True
-            self._chain = copilot_llm.resolve_chain(config)
-            self._eligible = copilot_llm.eligible_endpoints(
-                self._chain, config.allow_remote_context)
-            self._build()
-
-        def _build(self):
-            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            outer.add_css_class("intent-pane")
-            outer.set_margin_top(10)
-            outer.set_margin_bottom(10)
-            outer.set_margin_start(12)
-            outer.set_margin_end(12)
-            heading = Gtk.Label(label="Describe what you want to do")
-            heading.set_xalign(0.0)
-            heading.add_css_class("heading")
-            # Always show the endpoint chain (local-first) and what is gated.
-            self._endpoint_label = Gtk.Label(
-                label=copilot_llm.chain_label(
-                    self._chain, self._config.allow_remote_context))
-            self._endpoint_label.set_xalign(0.0)
-            self._endpoint_label.add_css_class("intent-endpoint")
-            ask_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            self._entry = Gtk.Entry()
-            self._entry.set_hexpand(True)
-            self._entry.set_placeholder_text(
-                "e.g. split a video into frames")
-            self._entry.connect("activate", lambda *_: self._submit())
-            self._ask = Gtk.Button(label="Ask")
-            self._ask.connect("clicked", lambda *_: self._submit())
-            self._spinner = Gtk.Spinner()
-            ask_row.append(self._entry)
-            ask_row.append(self._ask)
-            ask_row.append(self._spinner)
-            self._notice = Gtk.Label()
-            self._notice.set_xalign(0.0)
-            self._notice.set_wrap(True)
-            self._notice.add_css_class("intent-notice")
-            self._results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                                    spacing=8)
-            scroller = Gtk.ScrolledWindow()
-            scroller.set_vexpand(True)
-            scroller.set_child(self._results)
-            outer.append(heading)
-            outer.append(self._endpoint_label)
-            outer.append(ask_row)
-            outer.append(self._notice)
-            outer.append(scroller)
-            self.widget = self._wrap_with_hint(outer)
-            click = Gtk.GestureClick()
-            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-            click.connect("pressed", lambda *_: (self.on_activated
-                                                 and self.on_activated(self)))
-            self.widget.add_controller(click)
-            if not self._eligible:
-                # Every configured endpoint is the gated cloud model and
-                # the opt-in is off — or nothing is configured at all.
-                self._ask.set_sensitive(False)
-                if self._chain:
-                    self._notice.set_text(
-                        "Only the cloud model (OpenAI) is configured, and "
-                        "remote context is off. Set "
-                        "assistant.llm.allow_remote_context to true to use "
-                        "it. Context is always redacted before sending.")
-                else:
-                    self._notice.set_text(
-                        "No model endpoints configured. Add them to "
-                        "auth.json (see docs/copilot.md).")
-
-        def focus(self):
-            self._entry.grab_focus()
-
-        def _clear_results(self):
-            child = self._results.get_first_child()
-            while child is not None:
-                nxt = child.get_next_sibling()
-                self._results.remove(child)
-                child = nxt
-
-        def _submit(self):
-            query = self._entry.get_text().strip()
-            if not query:
-                return
-            self._clear_results()
-            self._notice.set_text("")
-            self._spinner.start()
-            self._ask.set_sensitive(False)
-            context = self._gather_context()
-            config = self._config
-            chain = self._chain
-
-            def work():
-                try:
-                    result = copilot_llm.suggest_commands(
-                        config, query=query, chain=chain, **context)
-                    GLib.idle_add(self._show_result, result)
-                except copilot_llm.LlmError as exc:
-                    GLib.idle_add(self._show_error, str(exc))
-
-            threading.Thread(target=work, daemon=True).start()
-
-        def _finish_request(self):
-            self._spinner.stop()
-            self._ask.set_sensitive(True)
-
-        def _show_error(self, message):
-            if not self._alive:
-                return GLib.SOURCE_REMOVE
-            self._finish_request()
-            self._notice.set_text(message)
-            return GLib.SOURCE_REMOVE
-
-        def _show_result(self, result):
-            if not self._alive:
-                return GLib.SOURCE_REMOVE
-            self._finish_request()
-            via = f"via {result.endpoint}" if result.endpoint else ""
-            if not result.templates:
-                self._notice.set_text("No suggestions came back. Try "
-                                      "rephrasing the goal.")
-                return GLib.SOURCE_REMOVE
-            self._notice.set_text(
-                f"{result.note}  ·  {via}".strip(" ·") if result.note
-                else via)
-            for template in result.templates:
-                self._results.append(self._template_card(template))
-            return GLib.SOURCE_REMOVE
-
-        def _template_card(self, template):
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            card.add_css_class("intent-card")
-            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            cmd = Gtk.Label(label=template.command)
-            cmd.set_xalign(0.0)
-            cmd.set_hexpand(True)
-            cmd.set_wrap(True)
-            cmd.set_selectable(True)
-            cmd.add_css_class("copilot-cmd")
-            badge = Gtk.Label(label=template.risk.display)
-            badge.set_valign(Gtk.Align.START)
-            badge.add_css_class("risk-badge")
-            badge.add_css_class(f"risk-{template.risk.display}")
-            header.append(cmd)
-            header.append(badge)
-            card.append(header)
-            if template.description:
-                desc = Gtk.Label(label=template.description)
-                desc.set_xalign(0.0)
-                desc.set_wrap(True)
-                desc.add_css_class("copilot-desc")
-                card.append(desc)
-            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            insert = Gtk.Button(label="Insert")
-            insert.connect("clicked",
-                           lambda *_: self._on_insert(template.command))
-            copy = Gtk.Button(label="Copy")
-            copy.connect("clicked", lambda *_: self._copy(template.command))
-            explain = Gtk.Button(label="Explain")
-            explain_label = Gtk.Label()
-            explain_label.set_xalign(0.0)
-            explain_label.set_wrap(True)
-            explain_label.add_css_class("intent-explain")
-            explain.connect(
-                "clicked",
-                lambda *_: self._explain(template.command, explain_label))
-            buttons.append(insert)
-            buttons.append(copy)
-            buttons.append(explain)
-            card.append(buttons)
-            card.append(explain_label)
-            return card
-
-        def _copy(self, text):
-            try:
-                self.widget.get_clipboard().set(text)
-            except Exception:
-                pass
-
-        def _explain(self, command, label):
-            label.set_text("…")
-            config = self._config
-            chain = self._chain
-
-            def work():
-                try:
-                    text = copilot_llm.explain(config, command,
-                                               chain=chain).text
-                except copilot_llm.LlmError as exc:
-                    text = str(exc)
-                GLib.idle_add(self._set_label, label, text)
-
-            threading.Thread(target=work, daemon=True).start()
-
-        def _set_label(self, label, text):
-            if self._alive:
-                label.set_text(text)
-            return GLib.SOURCE_REMOVE
-
-        def dispose(self):
-            self._alive = False
-
     class AgentPaneLayoutWidget(Gtk.Widget):
         """Custom container that hands its allocation to the layout owner."""
 
@@ -3347,6 +3136,7 @@ def build_native_classes(g):
             dead_keys.connect("key-pressed", self._on_dead_key)
             self.add_controller(dead_keys)
             self._completion_popover = None
+            self._ask_popover = None
             self._summary_dialog = None
             self._resume_prompted = False
             self._session_checkpoint_id = None
@@ -3391,7 +3181,7 @@ def build_native_classes(g):
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
-            view.append("Assistant Panel…", "win.copilot-panel")
+            view.append("Ask Copilot…", "win.copilot-ask")
             view.append("Session Summary…", "win.copilot-summary")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
@@ -3899,8 +3689,8 @@ def build_native_classes(g):
                 self._route("zoom_reset")
             elif name == "copilot-menu":
                 self.show_completion_menu()
-            elif name == "copilot-panel":
-                self.show_intent_panel()
+            elif name == "copilot-ask":
+                self.show_ask_overlay()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -3931,23 +3721,344 @@ def build_native_classes(g):
 
         # -- completion menu + pause (copilot P2) ---------------------------
 
-        def show_intent_panel(self):
-            tab = self.active_tab()
-            if tab is None:
+        def _ask_commit(self, pane, command, run):
+            """The ONLY path that may feed a submit byte.
+
+            The taken command is typed with no trailing newline; it is
+            *run* (a carriage return fed) only when auto-pilot cleared it
+            via can_take. Every other insert in the app is newline-free.
+            """
+            pane.insert_text(command)
+            if run:
+                pane.insert_text("\r")
+            pane.focus()
+
+        def _copy_text(self, text):
+            try:
+                self.get_clipboard().set(text)
+            except Exception:
+                pass
+
+        def show_ask_overlay(self):
+            """In-place ask mode: an LLM chat at the prompt (Ctrl+?).
+
+            The half-typed shell line is carried in as redacted context and
+            parked (cleared); the answer can be taken back onto the line
+            with one key. Nothing runs without a keystroke unless auto-pilot
+            has cleared a safe command. All network work goes through the
+            gated, redacting choke point in copilot.llm on a worker thread.
+            """
+            pane = self._active_pane()
+            if pane is None or pane.kind != "terminal":
                 return
-            # One assistant panel per tab: a second Ctrl+Shift+P jumps to
-            # the existing panel instead of stacking another one.
-            existing = next((p for p in tab.panes.values()
-                             if p.kind == "intent"), None)
-            if existing is not None:
-                tab.set_active(existing.pane_id, focus=True)
+            ask_cfg = self.options.native_config.assistant.ask
+            if not ask_cfg.enabled:
                 return
-            pane = IntentPane(
-                config=self.options.native_config.assistant.llm,
-                gather_context=self._assistant_context,
-                on_insert=self.insert_into_active_terminal,
-                on_activated=self._on_viewer_activated)
-            tab.add_pane(pane, VERTICAL)
+            llm_cfg = self.options.native_config.assistant.llm
+            chain = copilot_llm.resolve_chain(llm_cfg)
+            eligible = copilot_llm.eligible_endpoints(
+                chain, llm_cfg.allow_remote_context)
+
+            # Seed: carry the current shell line as context, then park it.
+            seed = ""
+            tracker = getattr(pane, "_tracker", None)
+            if ask_cfg.carry_draft and tracker is not None:
+                seed = tracker.typed_prefix() or ""
+            session = copilot_ask.AskSession(
+                seed=seed, carry_draft=ask_cfg.carry_draft,
+                max_turns=ask_cfg.max_turns)
+            if session.parked:
+                pane.insert_text("\x15")   # Ctrl-U: park (clear) the line
+
+            if self._ask_popover is not None:
+                self._ask_popover.popdown()
+            popover = Gtk.Popover()
+            self._ask_popover = popover
+            popover.add_css_class("copilot-ask")
+            popover.set_parent(pane.terminal)
+            popover.set_position(Gtk.PositionType.BOTTOM)
+            popover.set_pointing_to(self._cursor_rect(pane.terminal))
+
+            header = Gtk.Label(label=copilot_llm.chain_label(
+                chain, llm_cfg.allow_remote_context))
+            header.set_xalign(0.0)
+            header.add_css_class("intent-endpoint")
+            transcript = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                 spacing=8)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                               Gtk.PolicyType.AUTOMATIC)
+            scroller.set_min_content_height(200)
+            scroller.set_min_content_width(460)
+            scroller.set_child(transcript)
+            notice = Gtk.Label()
+            notice.set_xalign(0.0)
+            notice.set_wrap(True)
+            notice.add_css_class("intent-notice")
+            entry = Gtk.Entry()
+            entry.set_hexpand(True)
+            entry.set_placeholder_text("Ask the assistant…  (Enter to send)")
+            spinner = Gtk.Spinner()
+            entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                spacing=6)
+            entry_row.append(entry)
+            entry_row.append(spinner)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            box.append(header)
+            if session.parked:
+                # The seed is shown locally only; it is redacted before send.
+                chip = Gtk.Label(label=f"carrying: {seed}")
+                chip.set_xalign(0.0)
+                chip.set_wrap(True)
+                chip.add_css_class("ask-seed")
+                box.append(chip)
+            box.append(scroller)
+            box.append(notice)
+            box.append(entry_row)
+            popover.set_child(box)
+
+            state = {"took": False, "busy": False, "answer": None,
+                     "explain_label": None}
+
+            if not eligible:
+                entry.set_sensitive(False)
+                session.state = copilot_ask.GATED
+                notice.set_text(
+                    "Only the cloud model (OpenAI) is configured and remote "
+                    "context is off — set assistant.llm.allow_remote_context "
+                    "to use it. Context is always redacted before sending."
+                    if chain else
+                    "No model endpoints configured. Add them to auth.json "
+                    "(see docs/copilot.md).")
+
+            def alive():
+                return self._ask_popover is popover
+
+            def scroll_to_end():
+                adj = scroller.get_vadjustment()
+                GLib.idle_add(lambda: (adj.set_value(adj.get_upper()),
+                                       GLib.SOURCE_REMOVE)[1])
+
+            def add_question_row(text):
+                row = Gtk.Label(label=f"you › {text}")
+                row.set_xalign(0.0)
+                row.set_wrap(True)
+                row.add_css_class("ask-question")
+                transcript.append(row)
+
+            def add_error_row(text):
+                row = Gtk.Label(label=text)
+                row.set_xalign(0.0)
+                row.set_wrap(True)
+                row.add_css_class("intent-notice")
+                transcript.append(row)
+                scroll_to_end()
+
+            def take(answer):
+                if answer is None:
+                    return
+                take_ok, run_ok = copilot_ask.can_take(
+                    answer.command, answer.risk_display,
+                    auto_pilot=ask_cfg.auto_pilot,
+                    ceiling=ask_cfg.auto_pilot_max_risk)
+                if not take_ok:
+                    # Multi-line: never fed to the shell — copy instead.
+                    self._copy_text(answer.command)
+                    notice.set_text("Multi-line command copied to the "
+                                    "clipboard (not inserted).")
+                    return
+                state["took"] = True
+                popover.popdown()
+                self._ask_commit(pane, answer.command, run=run_ok)
+
+            def explain(answer, label_widget):
+                if answer is None or state["busy"]:
+                    return
+                label_widget.set_text("…")
+                cfg, ch, cmd = llm_cfg, chain, answer.command
+
+                def work():
+                    try:
+                        text = copilot_llm.explain(cfg, cmd, chain=ch).text
+                    except copilot_llm.LlmError as exc:
+                        text = str(exc)
+                    GLib.idle_add(set_label, label_widget, text)
+
+                threading.Thread(target=work, daemon=True).start()
+
+            def set_label(label_widget, text):
+                if alive():
+                    label_widget.set_text(text)
+                return GLib.SOURCE_REMOVE
+
+            def add_answer_card(answer):
+                card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                card.add_css_class("intent-card")
+                head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                               spacing=6)
+                cmd = Gtk.Label(label=answer.command)
+                cmd.set_xalign(0.0)
+                cmd.set_hexpand(True)
+                cmd.set_wrap(True)
+                cmd.set_selectable(True)
+                cmd.add_css_class("copilot-cmd")
+                badge = Gtk.Label(label=answer.risk_display)
+                badge.set_valign(Gtk.Align.START)
+                badge.add_css_class("risk-badge")
+                badge.add_css_class(f"risk-{answer.risk_display}")
+                head.append(cmd)
+                head.append(badge)
+                card.append(head)
+                if answer.description:
+                    desc = Gtk.Label(label=answer.description)
+                    desc.set_xalign(0.0)
+                    desc.set_wrap(True)
+                    desc.add_css_class("copilot-desc")
+                    card.append(desc)
+                take_ok, run_ok = copilot_ask.can_take(
+                    answer.command, answer.risk_display,
+                    auto_pilot=ask_cfg.auto_pilot,
+                    ceiling=ask_cfg.auto_pilot_max_risk)
+                via = f"via {answer.endpoint}" if answer.endpoint else ""
+                cue = ("takes and runs it" if run_ok else
+                       "Y / Enter takes it onto the line" if take_ok else
+                       "multi-line — copies only")
+                meta = Gtk.Label(label=f"{via} · {cue}".strip(" ·"))
+                meta.set_xalign(0.0)
+                meta.set_wrap(True)
+                meta.add_css_class("copilot-desc")
+                card.append(meta)
+                explain_label = Gtk.Label()
+                explain_label.set_xalign(0.0)
+                explain_label.set_wrap(True)
+                explain_label.add_css_class("intent-explain")
+                buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+                take_btn = Gtk.Button(label="Take (Y)")
+                take_btn.connect("clicked", lambda *_: take(answer))
+                cancel_btn = Gtk.Button(label="Cancel (N)")
+                cancel_btn.connect("clicked", lambda *_: popover.popdown())
+                explain_btn = Gtk.Button(label="Explain (T)")
+                explain_btn.connect(
+                    "clicked", lambda *_: explain(answer, explain_label))
+                buttons.append(take_btn)
+                buttons.append(cancel_btn)
+                buttons.append(explain_btn)
+                card.append(buttons)
+                card.append(explain_label)
+                transcript.append(card)
+                state["answer"] = answer
+                state["explain_label"] = explain_label
+                scroll_to_end()
+
+            def on_result(result):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                state["busy"] = False
+                if not result.templates:
+                    session.add_error("No suggestion came back.")
+                    add_error_row("No suggestion came back — try rephrasing.")
+                    entry.grab_focus()
+                    return GLib.SOURCE_REMOVE
+                template = result.templates[0]
+                session.add_answer(command=template.command,
+                                   description=template.description,
+                                   risk_display=template.risk.display,
+                                   endpoint=result.endpoint)
+                if result.note:
+                    notice.set_text(result.note)
+                add_answer_card(session.last_answer())
+                entry.grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def on_error(message):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                state["busy"] = False
+                session.add_error(message)
+                add_error_row(message)
+                entry.grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def submit_question(text):
+                if state["busy"] or not eligible:
+                    return
+                query = session.begin_question(text)
+                add_question_row(text)
+                entry.set_text("")
+                notice.set_text("")
+                spinner.start()
+                state["busy"] = True
+                cfg, ch = llm_cfg, chain
+                context = self._assistant_context()
+                draft = session.seed or None
+
+                def work():
+                    try:
+                        result = copilot_llm.suggest_commands(
+                            cfg, query=query, chain=ch,
+                            draft_command=draft, **context)
+                        GLib.idle_add(on_result, result)
+                    except copilot_llm.LlmError as exc:
+                        GLib.idle_add(on_error, str(exc))
+
+                threading.Thread(target=work, daemon=True).start()
+
+            def on_activate(_entry):
+                text = entry.get_text().strip()
+                if text:
+                    submit_question(text)
+                elif copilot_ask.hotkeys_armed(session.state, ""):
+                    take(state["answer"])
+
+            def on_key(controller, keyval, keycode, kstate):
+                name = (Gdk.keyval_name(keyval) or "").lower()
+                if name == "escape":
+                    popover.popdown()
+                    return True
+                if not copilot_ask.hotkeys_armed(
+                        session.state, entry.get_text()):
+                    return False
+                if name == "y":
+                    take(state["answer"])
+                    return True
+                if name == "n":
+                    popover.popdown()
+                    return True
+                if name == "t":
+                    explain(state["answer"], state["explain_label"])
+                    return True
+                return False
+
+            entry.connect("activate", on_activate)
+            keys = Gtk.EventControllerKey()
+            keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            keys.connect("key-pressed", on_key)
+            entry.add_controller(keys)
+
+            def on_closed(p):
+                p.unparent()
+                if self._ask_popover is p:
+                    self._ask_popover = None
+                # Bailing out (Esc / click-away) puts the parked draft back;
+                # taking a command does not.
+                if session.parked and not state["took"]:
+                    pane.insert_text(seed)
+                pane.focus()
+
+            popover.connect("closed", on_closed)
+            popover.popup()
+            # A conversation surface, not a menu: after it is up, drop the
+            # autohide grab so it survives the async gap while the model
+            # answers instead of self-dismissing on focus churn. Escape /
+            # Cancel / Take close it; the focused entry captures typing.
+            popover.set_autohide(False)
+            # Defer the grab: grab_focus on an unmapped widget silently fails,
+            # and without an autohide grab the entry must take focus itself so
+            # keystrokes land here and not in the shell behind it.
+            GLib.idle_add(lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
 
         def _assistant_context(self):
             """cwd + project + recent commands from the recent terminal pane."""
@@ -4509,7 +4620,6 @@ def build_native_classes(g):
         TerminalPane=TerminalPane,
         MarkdownPane=MarkdownPane,
         ImagePane=ImagePane,
-        IntentPane=IntentPane,
         AgentPaneLayoutWidget=AgentPaneLayoutWidget,
         PaneLayoutContainer=PaneLayoutContainer,
         TerminalTab=TerminalTab,
