@@ -11,16 +11,9 @@ without a display. The GTK overlay drives it.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from agent_terminal.copilot import risk as risk_mod
-
-# Shell constructs the risk classifier cannot see into (command
-# substitution, backticks, process substitution, redirection). A command
-# containing any of these may hide destructive work in a place the
-# classifier never inspects, so it is never auto-run — only taken.
-_UNSAFE_AUTORUN = re.compile(r"\$\(|`|[<>]")
 
 # States (the overlay's lifecycle while open).
 INPUT = "input"          # entry focused, composing the question
@@ -107,8 +100,10 @@ def can_take(command, risk_display, *, auto_pilot=False,
 
     Take is offered only for a single-line command (a newline would run
     everything up to it when fed to the shell). Auto-run additionally
-    requires auto-pilot and a risk no higher than the ceiling and not
-    ``unknown`` — destructive/privileged/unknown never run on a keystroke.
+    requires auto-pilot, a risk no higher than the ceiling and not
+    ``unknown``, AND that the command passes the allowlist floor
+    (``risk.auto_run_safe``) — so a classifier gap can never let a
+    destructive command run on a keystroke.
     """
     if not command or "\n" in command or "\r" in command:
         return (False, False)
@@ -117,9 +112,6 @@ def can_take(command, risk_display, *, auto_pilot=False,
     severity = risk_mod.SEVERITY.get(risk_display, 0)
     ceiling_severity = risk_mod.SEVERITY.get(ceiling, risk_mod.SEVERITY[
         risk_mod.LOCAL_CHANGE])
-    run_ok = 1 <= severity <= ceiling_severity   # excludes unknown (0)
-    if run_ok and _UNSAFE_AUTORUN.search(command):
-        # Defense in depth: a substitution/redirection can hide destructive
-        # work the classifier graded low. Take it, but never on a keystroke.
-        run_ok = False
+    run_ok = (1 <= severity <= ceiling_severity            # excludes unknown
+              and risk_mod.auto_run_safe(command))         # allowlist floor
     return (True, run_ok)

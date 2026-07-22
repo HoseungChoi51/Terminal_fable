@@ -179,13 +179,22 @@ def _classify_find(args) -> str:
         return DESTRUCTIVE
     for flag in _FIND_EXEC:
         if flag in args:
-            inner = []
+            inner, placeholder = [], False
             for tok in args[args.index(flag) + 1:]:
                 if tok in _FIND_EXEC_TERM:
                     break
-                if tok != "{}":
+                if tok == "{}":
+                    placeholder = True
+                else:
                     inner.append(tok)
-            return _classify_segment(inner) if inner else DESTRUCTIVE
+            if not inner:
+                return DESTRUCTIVE
+            grade = _classify_segment(inner)
+            # A mutating inner applied to {} rewrites every match, an
+            # unbounded fileset — scale it up from local-change.
+            if placeholder and grade == LOCAL_CHANGE:
+                return DESTRUCTIVE
+            return grade
     if any(a.startswith(_FIND_WRITE) for a in args):
         return DESTRUCTIVE
     return READ_ONLY
@@ -225,28 +234,33 @@ def _tool_default(name) -> str:
     return UNKNOWN
 
 
+_GIT_FORCE = frozenset({"-f", "--force", "--discard-changes"})
+
+
 def _git_is_destructive(args) -> bool:
     subs = [a for a in args if not a.startswith("-")]
     first = subs[0] if subs else ""
+    force = any(f in args for f in _GIT_FORCE)
     if "reset" in args and "--hard" in args:
         return True
     if "clean" in args and any("f" in a for a in args if a.startswith("-")):
         return True
     if "branch" in args and "-D" in args:
         return True
-    if "push" in args and ("--force" in args or "-f" in args):
+    if "push" in args and force:
         return True
     # Working-tree / history discards that grade "local-change" otherwise.
     if first == "reflog" and ("expire" in subs or "delete" in subs):
         return True
     if first == "restore":                       # discards worktree changes
         return True
-    if first == "checkout" and ("." in args or "--" in args):
-        return True                              # pathspec checkout overwrites
+    if first == "switch" and force:              # -f/--discard-changes wipes
+        return True
+    if first == "checkout" and ("." in args or "--" in args or force):
+        return True                              # pathspec / forced overwrite
     if first == "stash" and ("drop" in subs or "clear" in subs):
         return True
-    if first == "worktree" and "remove" in subs and (
-            "--force" in args or "-f" in args):
+    if first == "worktree" and "remove" in subs and force:
         return True
     return False
 
@@ -286,3 +300,66 @@ def classify(command) -> RiskResult:
         labels = {UNKNOWN}
     display = max(labels, key=lambda label: SEVERITY[label])
     return RiskResult(frozenset(labels), display, SEVERITY[display])
+
+
+# -- auto-run allowlist (the robust floor under auto-pilot) --------------
+#
+# classify() is a denylist and will always have gaps (a destructive command
+# it has not learned grades low). For *unattended execution* that is not
+# good enough, so auto-run is gated by an allowlist as well: only commands
+# whose every segment is a known-safe program run without a keystroke. A
+# classifier miss then costs at most a wrong badge, never an auto-run.
+#
+# Curated (not derived from _READ_ONLY): `find` is excluded — its flags
+# (-delete/-exec/-fprint) make it a footgun whose safety would again depend
+# on the classifier — and pagers / interactive programs (less, more, man,
+# top, htop) are excluded because they would block an unattended run. The
+# set is deliberately small; broaden it only with evidence a program is
+# safe to run unattended.
+_AUTORUN_ALLOWLIST = frozenset({
+    "ls", "ll", "la", "cat", "head", "tail", "grep", "egrep", "rg", "ag",
+    "fd", "du", "df", "ps", "pwd", "echo", "which", "type", "printenv",
+    "env", "wc", "sort", "uniq", "cut", "tr", "stat", "file", "tree",
+    "date", "whoami", "id", "uname", "hostname", "history", "jobs", "free",
+    "uptime", "lsblk", "lsusb", "lspci", "dmesg", "who", "w", "column",
+    "mkdir", "touch",   # the only mutating programs, and both are safe
+})
+_AUTORUN_METACHARS = re.compile(r"\$\(|`|[<>]")
+
+
+def _segment_program(tokens) -> str:
+    """Leading program of a segment after peeling passthrough wrappers.
+
+    Privilege wrappers (sudo/…) are NOT peeled: their name is returned so
+    they fail the allowlist and never auto-run.
+    """
+    while tokens:
+        name = tokens[0].rsplit("/", 1)[-1]
+        if name in _PASSTHROUGH_WRAPPERS:
+            inner = _peel_wrapper(name, tokens[1:])
+            if not inner:
+                return name
+            tokens = inner
+            continue
+        return name
+    return ""
+
+
+def auto_run_safe(command) -> bool:
+    """True only if `command` is safe to run unattended (auto-pilot).
+
+    Robust by construction: every pipeline segment must lead with an
+    allowlisted program and the command must contain no substitution or
+    redirection. Anything unrecognized — a new program, a wrapped or
+    mis-graded command, a metacharacter the classifier can't see into — is
+    refused, so a classifier gap can never let a destructive command run.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if _AUTORUN_METACHARS.search(command):
+        return False
+    segments = _segments(command)
+    if not segments:
+        return False
+    return all(_segment_program(_tokenize(seg)) in _AUTORUN_ALLOWLIST
+               for seg in segments)

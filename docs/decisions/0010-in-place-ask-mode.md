@@ -36,15 +36,17 @@ pure `AskSession` state machine in the GTK-free core
   not.
 - **Take, don't run.** An answer is *taken* onto the shell line with no
   trailing newline. Auto-run is opt-in (`assistant.ask.auto_pilot`, off
-  by default) and even then only for commands at or below a risk ceiling
-  (`local-change`), never `unknown`, and never one containing a
-  substitution/redirection the risk classifier cannot see into (`$(…)`,
-  backticks, `<`/`>`) — those are takeable but never auto-run. The
-  classifier itself peels passthrough wrappers (`env`, `xargs`,
-  `timeout`, …) and grades `find … -delete`/`-exec` as destructive, so a
-  wrapper cannot hide a destructive inner command behind a low badge.
-  `can_take` also refuses any multi-line command (a newline would run
-  everything up to it) — those are copied instead.
+  by default) and gated three ways: the risk must be at or below the
+  ceiling (`local-change`) and not `unknown`; the command must be
+  single-line (a newline would run everything up to it — multi-line
+  answers are copied instead); **and** it must pass an *allowlist floor*
+  (`risk.auto_run_safe`). The classifier is a denylist and will always
+  have gaps, so it is not trusted alone for unattended execution: a
+  command auto-runs only when every pipeline segment leads with a program
+  on a small curated safe list (read-only utilities plus `mkdir`/`touch`;
+  `find`, pagers, and interactive programs are deliberately excluded) and
+  it contains no substitution or redirection. A classifier miss then
+  costs at most a wrong badge, never an auto-run.
 - **One guarded submit path.** `_ask_commit` is the single place in the
   app that may feed a submit byte (`\r`), and only under `if run:`. A
   source-guardrail test forbids any other newline/CR feed.

@@ -109,31 +109,38 @@ class CanTakeTests(unittest.TestCase):
     def test_empty_command_rejected(self):
         self.assertEqual(ask.can_take("", risk.READ_ONLY), (False, False))
 
-    def test_autopilot_runs_safe_commands(self):
-        for label in (risk.READ_ONLY, risk.LOCAL_CHANGE):
-            take_ok, run_ok = ask.can_take("cmd", label, auto_pilot=True)
-            self.assertTrue(run_ok, label)
+    def test_autopilot_runs_allowlisted_safe_commands(self):
+        for cmd, label in (("ls -la", risk.READ_ONLY),
+                           ("grep -rn x .", risk.READ_ONLY),
+                           ("mkdir logs", risk.LOCAL_CHANGE),
+                           ("touch f", risk.LOCAL_CHANGE)):
+            take_ok, run_ok = ask.can_take(cmd, label, auto_pilot=True)
+            self.assertTrue(run_ok, cmd)
 
-    def test_autopilot_holds_risky_commands(self):
+    def test_autopilot_holds_high_severity(self):
+        # The severity ceiling blocks anything above it, even allowlisted.
         for label in (risk.INSTALL, risk.REMOTE, risk.PRIVILEGED,
                       risk.DESTRUCTIVE, risk.UNKNOWN):
-            take_ok, run_ok = ask.can_take("cmd", label, auto_pilot=True)
+            take_ok, run_ok = ask.can_take("ls", label, auto_pilot=True)
             self.assertTrue(take_ok, label)
             self.assertFalse(run_ok, label)
 
-    def test_ceiling_raises_the_bar(self):
-        take_ok, run_ok = ask.can_take("cmd", risk.INSTALL, auto_pilot=True,
-                                       ceiling=risk.INSTALL)
-        self.assertTrue(run_ok)
+    def test_allowlist_floor_holds_non_allowlisted_graded_low(self):
+        # The floor: even if a classifier gap grades one of these read-only
+        # or local-change, a non-allowlisted program never auto-runs.
+        for cmd in ("git checkout .", "git switch -f main",
+                    "find . -exec cp /dev/null {} +", "sed -i s/a/b/ f",
+                    "chmod -R 000 /", "cp a b", "mv x /dev/null"):
+            _, run_ok = ask.can_take(cmd, risk.LOCAL_CHANGE, auto_pilot=True)
+            self.assertFalse(run_ok, cmd)
 
-    def test_unknown_never_runs_even_with_high_ceiling(self):
-        _, run_ok = ask.can_take("cmd", risk.UNKNOWN, auto_pilot=True,
-                                 ceiling=risk.DESTRUCTIVE)
+    def test_ceiling_read_only_excludes_local_change(self):
+        # A stricter ceiling makes even an allowlisted creator wait.
+        _, run_ok = ask.can_take("mkdir d", risk.LOCAL_CHANGE,
+                                 auto_pilot=True, ceiling=risk.READ_ONLY)
         self.assertFalse(run_ok)
 
     def test_metacharacters_never_auto_run(self):
-        # A substitution/redirection can hide destructive work the classifier
-        # graded low; such a command is takeable but never auto-run.
         for cmd in ("echo $(rm -rf ~)", "cat x > /dev/sda",
                     "echo hi > ~/.bashrc", "diff <(a) <(b)",
                     "echo `whoami`", "sort f < in.txt"):

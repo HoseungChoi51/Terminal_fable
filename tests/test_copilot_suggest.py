@@ -162,6 +162,20 @@ class RiskTests(unittest.TestCase):
         self.assertRisk("chmod 644 f", crisk.LOCAL_CHANGE)
         self.assertRisk("sed 's/a/b/' f", crisk.LOCAL_CHANGE)
 
+    def test_git_switch_and_forced_checkout_are_destructive(self):
+        self.assertRisk("git switch --discard-changes main",
+                        crisk.DESTRUCTIVE)
+        self.assertRisk("git switch -f main", crisk.DESTRUCTIVE)
+        self.assertRisk("git checkout -f main", crisk.DESTRUCTIVE)
+        # a plain branch switch stays local-change
+        self.assertRisk("git switch main", crisk.LOCAL_CHANGE)
+
+    def test_find_exec_mutating_inner_over_matches_is_destructive(self):
+        self.assertRisk("find . -exec cp /dev/null {} +", crisk.DESTRUCTIVE)
+        self.assertRisk("find . -type f -exec tee {} ;", crisk.DESTRUCTIVE)
+        # a read-only inner stays read-only
+        self.assertRisk("find . -exec grep TODO {} ;", crisk.READ_ONLY)
+
     def test_unknown(self):
         self.assertRisk("frobnicate --wibble", crisk.UNKNOWN)
 
@@ -172,6 +186,36 @@ class RiskTests(unittest.TestCase):
         result = crisk.classify("frobnicate | rm -rf x")
         self.assertNotIn(crisk.UNKNOWN, result.labels)
         self.assertEqual(result.display, crisk.DESTRUCTIVE)
+
+
+class AutoRunSafeTests(unittest.TestCase):
+    def test_allowlisted_programs(self):
+        for cmd in ("ls -la", "grep -rn x .", "cat f", "du -sh *",
+                    "mkdir -p a/b", "touch f", "ls | grep x | sort",
+                    "env FOO=1 ls", "timeout 5 ls", "echo hi"):
+            self.assertTrue(crisk.auto_run_safe(cmd), cmd)
+
+    def test_non_allowlisted_programs(self):
+        for cmd in ("git status", "cp a b", "mv a b", "sed s/a/b/ f",
+                    "rm f", "apt install x", "docker ps", "sudo ls",
+                    "curl x", "make", "find . -name x", "less f",
+                    "top", "unknowncmd"):
+            self.assertFalse(crisk.auto_run_safe(cmd), cmd)
+
+    def test_metacharacters_block(self):
+        for cmd in ("ls > f", "cat < f", "echo $(x)", "ls `pwd`",
+                    "diff <(a) <(b)"):
+            self.assertFalse(crisk.auto_run_safe(cmd), cmd)
+
+    def test_every_pipeline_segment_must_be_safe(self):
+        self.assertTrue(crisk.auto_run_safe("ls | grep x"))
+        self.assertFalse(crisk.auto_run_safe("ls | xargs rm"))
+        self.assertFalse(crisk.auto_run_safe("cat f && rm f"))
+
+    def test_wrapper_hidden_command_is_not_safe(self):
+        self.assertFalse(crisk.auto_run_safe("env rm -rf x"))
+        self.assertFalse(crisk.auto_run_safe("timeout 5 rm -rf x"))
+        self.assertFalse(crisk.auto_run_safe("sudo ls"))
 
 
 class RecipeMetadataTests(unittest.TestCase):

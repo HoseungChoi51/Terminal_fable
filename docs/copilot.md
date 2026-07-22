@@ -100,8 +100,12 @@ language model, both **off by default** and gated:
   the entry (or Tab to it) and type — then Enter sends it. A
   multi-line answer is never fed to the shell — it is copied instead.
   Nothing runs on a keystroke unless you turn **auto-pilot** on, and even
-  then only read-only / local-change commands run automatically;
-  anything riskier (or unknown) still waits for your Enter. Auto-pilot is
+  then a command auto-runs only if it clears every safety gate: risk at
+  or below the ceiling (default `local-change`, never `unknown`),
+  single-line, no substitution/redirection, **and** on a small curated
+  allowlist of safe programs (read-only utilities plus `mkdir`/`touch`).
+  Anything else — git subcommands, `find`, installers, anything the
+  classifier can't vouch for — still waits for your Enter. Auto-pilot is
   `assistant.ask.auto_pilot` (off by default).
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
