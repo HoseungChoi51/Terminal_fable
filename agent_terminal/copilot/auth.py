@@ -41,10 +41,15 @@ class Endpoint:
     api_key: str | None = None
     model: str | None = None       # None -> discover / default at call time
     provider: str = "openai"       # OpenAI-compatible chat API
+    # Explicit trust override for an internet-tier host the operator vouches
+    # for — e.g. a private LiteLLM gateway on a public domain that fronts
+    # local models. Set via "trusted": true in auth.json. Never auto-set:
+    # a host is trusted only because a human said so.
+    trusted: bool = False
 
     def gated(self) -> bool:
         """Does reaching this endpoint require the remote-context opt-in?"""
-        return self.tier == INTERNET
+        return self.tier == INTERNET and not self.trusted
 
     def with_(self, **changes) -> "Endpoint":
         return replace(self, **changes)
@@ -99,7 +104,8 @@ def _parse_one(name, obj) -> Endpoint | None:
         priority = 0
     return Endpoint(label=str(label), base_url=str(base_url),
                     tier=classify_host(base_url), priority=priority,
-                    api_key=api_key, model=obj.get("model"))
+                    api_key=api_key, model=obj.get("model"),
+                    trusted=bool(obj.get("trusted")))
 
 
 def parse_endpoints(data) -> list[Endpoint]:
@@ -116,8 +122,10 @@ def parse_endpoints(data) -> list[Endpoint]:
             endpoint = _parse_one(name, obj)
             if endpoint is not None:
                 endpoints.append(endpoint)
-    endpoints.sort(key=lambda e: (_TIER_RANK.get(e.tier, 9), e.priority,
-                                  e.label))
+    # Most-private tier first; within a tier, usable (ungated) before gated
+    # so a trusted internet gateway is preferred over one needing opt-in.
+    endpoints.sort(key=lambda e: (_TIER_RANK.get(e.tier, 9), e.gated(),
+                                  e.priority, e.label))
     return endpoints
 
 

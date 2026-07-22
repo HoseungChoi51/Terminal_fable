@@ -59,6 +59,36 @@ class IsOpenAIHostTests(unittest.TestCase):
             self.assertFalse(auth.is_openai_host(url), url)
 
 
+class TrustedTests(unittest.TestCase):
+    def test_trusted_internet_is_ungated(self):
+        eps = auth.parse_endpoints({"gw": [{
+            "label": "gw", "base_url": "https://proxy.example.com/",
+            "key": "sk-" + "y" * 20, "trusted": True}]})
+        self.assertEqual(eps[0].tier, auth.INTERNET)
+        self.assertTrue(eps[0].trusted)
+        self.assertFalse(eps[0].gated())          # usable without opt-in
+
+    def test_untrusted_internet_still_gated(self):
+        eps = auth.parse_endpoints({"gw": [{
+            "label": "gw", "base_url": "https://proxy.example.com/"}]})
+        self.assertFalse(eps[0].trusted)
+        self.assertTrue(eps[0].gated())
+
+    def test_trusted_sorts_before_gated_within_tier(self):
+        # A trusted gateway must beat OpenAI even though its label sorts
+        # later — usability (ungated), not alphabetical, decides order.
+        eps = auth.parse_endpoints({
+            "lan": [{"label": "lan", "base_url": "http://10.0.0.1/v1"}],
+            "openai": [{"label": "aopen", "key": "sk-" + "y" * 20,
+                        "base_url": "https://api.openai.com/v1"}],
+            "gw": [{"label": "zgate", "trusted": True, "key": "sk-" + "z" * 20,
+                    "base_url": "https://proxy.example.com/"}],
+        })
+        self.assertEqual([e.label for e in eps], ["lan", "zgate", "aopen"])
+        self.assertFalse(eps[1].gated())          # trusted gateway usable
+        self.assertTrue(eps[2].gated())           # OpenAI still gated
+
+
 class ParseTests(unittest.TestCase):
     def test_parses_real_shape(self):
         eps = auth.parse_endpoints(_AUTH)

@@ -137,10 +137,16 @@ applies only to the internet tier:
 | on-device | `127.0.0.1`, `localhost` | no — data never leaves your machine |
 | LAN | `192.168.x`, `10.x`, `*.local` | no — trusted local network |
 | internet | `api.openai.com` | **yes** — `allow_remote_context` must be on |
+| internet, `"trusted": true` | your own gateway on a public domain | no — you vouched for it |
 
 So local and LAN models work out of the box; the cloud (OpenAI) is used
 only as a last resort, and only after you turn
-`assistant.llm.allow_remote_context` on.
+`assistant.llm.allow_remote_context` on. A private gateway that lives on
+a public domain (e.g. a LiteLLM proxy fronting your local models) is
+classified `internet` and gated by default — mark it `"trusted": true`
+in its auth.json entry to use it freely without un-gating OpenAI too.
+Redacted context still travels over the internet to reach it, so only
+trust a host you control.
 
 ### Configuring endpoints (auth.json)
 
@@ -160,12 +166,18 @@ copy in the repo root is also picked up in development).
 ```
 
 - Each entry has a `base_url`; add `"model"` to pin one, otherwise the
-  model name is discovered from the server (`GET /v1/models`).
+  model name is discovered from the server (`GET /v1/models`). An
+  OpenAI-compatible gateway (LiteLLM, etc.) that fronts several backends
+  works as one entry — the model name selects the backend.
 - A LAN/on-device entry needs no key. A `GPT`/`OpenAI` entry supplies the
   cloud key (and defaults `base_url` to OpenAI); its key is sent only in
   the `Authorization` header, never in the request or logs.
-- Entries are ordered most-private first automatically. Lower
-  `"priority"` wins within a tier.
+- Add `"trusted": true` to an internet-tier entry you control (e.g. a
+  private gateway on a public domain) to un-gate that host without
+  turning on the global cloud opt-in.
+- Entries are ordered most-private first automatically; within a tier,
+  usable (ungated/trusted) endpoints beat gated ones, then lower
+  `"priority"` wins.
 
 To turn on the cloud fallback, enable the opt-in in
 `~/.config/agent-terminal/native.json`:
