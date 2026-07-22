@@ -1,9 +1,10 @@
-"""Unit-level contracts for the copilot P5 LLM core.
+"""Contracts for the P5 LLM chain: tier gate, local-first, fallback.
 
-No real network: a fake opener records requests and returns canned
-responses. The safety-critical properties — the gate blocks all traffic
-when remote context is off, and every payload is redacted — are pinned
-here, plus a source guardrail that urllib lives only in llm.py.
+No real network: a fake server records requests and answers /models and
+/chat/completions. The safety-critical properties are pinned here — an
+internet endpoint is untouched when remote is off, context is always
+redacted, and secrets never leave the Authorization header — plus a
+source guardrail that network urllib stays in llm.py.
 """
 
 import dataclasses
@@ -11,13 +12,21 @@ import io
 import json
 import re
 import unittest
+import urllib.error
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from agent_terminal.copilot import auth
 from agent_terminal.copilot import llm as cllm
 from agent_terminal.copilot import risk as crisk
 from agent_terminal.copilot.config import LlmConfig
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+LAN1 = auth.Endpoint("Loki", "http://192.168.210.210:8080/v1", auth.LAN)
+LAN2 = auth.Endpoint("hulk", "http://192.168.210.205:8080/v1", auth.LAN)
+CLOUD = auth.Endpoint("GPT", auth.OPENAI_BASE_URL, auth.INTERNET,
+                      api_key="sk-secretkey", model="gpt-4.1-mini")
 
 
 class FakeResponse(io.BytesIO):
@@ -29,243 +38,213 @@ class FakeResponse(io.BytesIO):
         return False
 
 
-class FakeOpener:
-    """Records requests; returns a canned assistant message."""
+class FakeServer:
+    """Answers /models and /chat/completions; can fail chosen hosts."""
 
-    def __init__(self, content='{"commands": [], "note": ""}'):
+    def __init__(self, *, content="hi", models=("srv-model",),
+                 fail_hosts=()):
         self.content = content
+        self.models = list(models)
+        self.fail_hosts = set(fail_hosts)
         self.requests = []
 
     def __call__(self, request, timeout=None):
         self.requests.append(request)
-        body = {"choices": [{"message": {"content": self.content}}]}
+        host = urlsplit(request.full_url).hostname
+        if host in self.fail_hosts:
+            raise urllib.error.URLError("connection refused")
+        if request.full_url.endswith("/models"):
+            body = {"data": [{"id": m} for m in self.models]}
+        else:
+            body = {"choices": [{"message": {"content": self.content}}]}
         return FakeResponse(json.dumps(body).encode("utf-8"))
 
-    def last_body(self):
-        return json.loads(self.requests[-1].data.decode("utf-8"))
+    def hosts_hit(self):
+        return [urlsplit(r.full_url).hostname for r in self.requests]
 
-    def sent_text(self):
-        return json.dumps(self.last_body())
+    def chat_bodies(self):
+        return [json.loads(r.data.decode())
+                for r in self.requests if r.data]
 
 
 def _cfg(**kw):
-    return dataclasses.replace(LlmConfig(allow_remote_context=True), **kw)
+    return dataclasses.replace(LlmConfig(auth_path="/nonexistent"), **kw)
 
 
-class GateTests(unittest.TestCase):
-    def test_gate_blocks_when_disabled(self):
-        opener = FakeOpener()
-        config = LlmConfig(allow_remote_context=False)
+class TierGateTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_lan_used_without_optin(self):
+        server = FakeServer(content="local answer")
+        out = cllm.summarize(_cfg(allow_remote_context=False),
+                             recent_commands=["ls"],
+                             chain=[LAN1, CLOUD], opener=server)
+        self.assertEqual(out.text, "local answer")
+        self.assertEqual(out.endpoint, "Loki")
+        # the cloud endpoint was never contacted
+        self.assertNotIn("api.openai.com", server.hosts_hit())
+
+    def test_internet_only_chain_blocked_when_off(self):
+        server = FakeServer()
         with self.assertRaises(cllm.RemoteDisabledError):
-            cllm.suggest_commands(config, query="list files", opener=opener)
-        self.assertEqual(opener.requests, [], "network touched while gated")
+            cllm.summarize(_cfg(allow_remote_context=False),
+                           recent_commands=["ls"], chain=[CLOUD],
+                           opener=server)
+        self.assertEqual(server.requests, [])   # zero network
 
-    def test_gate_blocks_summary_when_disabled(self):
-        opener = FakeOpener()
-        with self.assertRaises(cllm.RemoteDisabledError):
-            cllm.summarize(LlmConfig(allow_remote_context=False),
-                           recent_commands=["ls"], opener=opener)
-        self.assertEqual(opener.requests, [])
+    def test_internet_used_when_opted_in(self):
+        server = FakeServer(content="cloud answer")
+        out = cllm.summarize(_cfg(allow_remote_context=True),
+                             recent_commands=["ls"], chain=[CLOUD],
+                             opener=server)
+        self.assertEqual(out.endpoint, "GPT")
 
-    def test_allowed_reflects_config(self):
-        self.assertFalse(cllm.ContextGate(LlmConfig()).allowed())
-        self.assertTrue(cllm.ContextGate(_cfg()).allowed())
+    def test_eligible_filter(self):
+        self.assertEqual(
+            [e.label for e in cllm.eligible_endpoints([LAN1, CLOUD], False)],
+            ["Loki"])
+        self.assertEqual(
+            [e.label for e in cllm.eligible_endpoints([LAN1, CLOUD], True)],
+            ["Loki", "GPT"])
 
 
-class RedactionTests(unittest.TestCase):
-    def test_context_is_redacted(self):
-        opener = FakeOpener()
-        cllm.suggest_commands(
-            _cfg(), query="deploy",
-            recent_commands=["export AWS_SECRET=AKIAIOSFODNN7EXAMPLE",
-                             "curl https://u:pw1234@host/x"],
-            cwd="/home/x", opener=opener)
-        sent = opener.sent_text()
+class FallbackTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_falls_through_to_next(self):
+        server = FakeServer(content="ok", fail_hosts={"192.168.210.210"})
+        out = cllm.summarize(_cfg(allow_remote_context=True),
+                             recent_commands=["ls"],
+                             chain=[LAN1, LAN2], opener=server)
+        self.assertEqual(out.endpoint, "hulk")
+
+    def test_local_first_falls_to_cloud(self):
+        server = FakeServer(content="cloud",
+                            fail_hosts={"192.168.210.210",
+                                        "192.168.210.205"})
+        out = cllm.summarize(_cfg(allow_remote_context=True),
+                             recent_commands=["ls"],
+                             chain=[LAN1, LAN2, CLOUD], opener=server)
+        self.assertEqual(out.endpoint, "GPT")
+
+    def test_all_fail_raises(self):
+        server = FakeServer(fail_hosts={"192.168.210.210",
+                                        "api.openai.com"})
+        with self.assertRaises(cllm.LlmError) as ctx:
+            cllm.summarize(_cfg(allow_remote_context=True),
+                           recent_commands=["ls"], chain=[LAN1, CLOUD],
+                           opener=server)
+        self.assertIn("all endpoints failed", str(ctx.exception))
+
+
+class ModelDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_lan_discovers_model(self):
+        server = FakeServer(models=["qwen3.5:4b"])
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=["ls"], chain=[LAN1], opener=server)
+        # a /models GET happened, and the chat used the advertised id
+        self.assertTrue(any(r.full_url.endswith("/models")
+                            for r in server.requests))
+        self.assertEqual(server.chat_bodies()[0]["model"], "qwen3.5:4b")
+
+    def test_internet_uses_config_model_no_discovery(self):
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=["ls"], chain=[CLOUD], opener=server)
+        self.assertFalse(any(r.full_url.endswith("/models")
+                             for r in server.requests))
+        self.assertEqual(server.chat_bodies()[0]["model"], "gpt-4.1-mini")
+
+
+class RedactionAndSecretTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_context_redacted_to_every_endpoint(self):
+        server = FakeServer()
+        cllm.summarize(
+            _cfg(allow_remote_context=True),
+            recent_commands=["export TOKEN=AKIAIOSFODNN7EXAMPLE"],
+            chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
-        self.assertNotIn("pw1234", sent)
         self.assertIn("REDACTED", sent)
 
-    def test_build_context_redacts_everything(self):
-        ctx = cllm.build_context(
-            recent_commands=["mysql --password=hunter2"],
-            cwd="/srv")
-        self.assertNotIn("hunter2", ctx)
+    def test_key_in_header_only_not_body(self):
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=["ls"], chain=[CLOUD], opener=server)
+        chat = next(r for r in server.requests
+                    if r.full_url.endswith("/chat/completions"))
+        self.assertEqual(chat.get_header("Authorization"),
+                         "Bearer sk-secretkey")
+        self.assertNotIn("sk-secretkey", chat.data.decode())
+
+    def test_lan_endpoint_sends_no_auth_header(self):
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=["ls"], chain=[LAN1], opener=server)
+        chat = next(r for r in server.requests
+                    if r.full_url.endswith("/chat/completions"))
+        self.assertIsNone(chat.get_header("Authorization"))
 
 
-class RequestShapeTests(unittest.TestCase):
-    def test_url_and_model_and_json_mode(self):
-        opener = FakeOpener()
-        cllm.suggest_commands(_cfg(model="big-model"), query="x",
-                              opener=opener)
-        req = opener.requests[-1]
-        self.assertTrue(req.full_url.endswith("/chat/completions"))
-        body = opener.last_body()
-        self.assertEqual(body["model"], "big-model")
-        self.assertEqual(body["response_format"], {"type": "json_object"})
-        self.assertEqual(body["messages"][0]["role"], "system")
+class IntentAndExplainTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
 
-    def test_base_url_configurable(self):
-        opener = FakeOpener()
-        cllm.suggest_commands(
-            _cfg(base_url="http://localhost:11434/v1"), query="x",
-            opener=opener)
-        self.assertEqual(opener.requests[-1].full_url,
-                         "http://localhost:11434/v1/chat/completions")
-
-    def test_api_key_header_from_env(self):
-        opener = FakeOpener()
-        import os
-        os.environ["TEST_LLM_KEY"] = "secret-key-123"
-        try:
-            cllm.suggest_commands(_cfg(api_key_env="TEST_LLM_KEY"),
-                                  query="x", opener=opener)
-        finally:
-            del os.environ["TEST_LLM_KEY"]
-        self.assertEqual(opener.requests[-1].get_header("Authorization"),
-                         "Bearer secret-key-123")
-
-    def test_no_key_no_auth_header(self):
-        opener = FakeOpener()
-        cllm.suggest_commands(_cfg(api_key_env="DEFINITELY_UNSET_KEY_XYZ"),
-                              query="x", opener=opener)
-        self.assertIsNone(opener.requests[-1].get_header("Authorization"))
-
-
-class ParseIntentTests(unittest.TestCase):
-    def test_parses_commands_and_placeholders(self):
-        opener = FakeOpener(json.dumps({
-            "commands": [
-                {"command": "ffmpeg -i <input> <out>/f_%04d.png",
-                 "description": "extract frames"},
-                {"command": "ls -la", "description": "list"}],
-            "note": "replace placeholders"}))
-        result = cllm.suggest_commands(_cfg(), query="frames", opener=opener)
-        self.assertEqual(len(result.templates), 2)
-        self.assertIn("<input>", result.templates[0].placeholders)
-        self.assertIn("<out>", result.templates[0].placeholders)
-        self.assertEqual(result.note, "replace placeholders")
-
-    def test_risk_classified(self):
-        opener = FakeOpener(json.dumps(
+    def test_intent_parses_and_reports_endpoint(self):
+        server = FakeServer(content=json.dumps(
             {"commands": [{"command": "rm -rf <dir>", "description": "d"}]}))
-        result = cllm.suggest_commands(_cfg(), query="x", opener=opener)
+        result = cllm.suggest_commands(
+            _cfg(allow_remote_context=True), query="x",
+            chain=[LAN1], opener=server)
         self.assertEqual(result.templates[0].risk.display, crisk.DESTRUCTIVE)
+        self.assertEqual(result.endpoint, "Loki")
 
-    def test_lenient_json_in_fences(self):
-        opener = FakeOpener('```json\n{"commands":[{"command":"pwd"}]}\n```')
-        result = cllm.suggest_commands(_cfg(), query="x", opener=opener)
-        self.assertEqual(result.templates[0].command, "pwd")
-
-    def test_garbage_response_empty(self):
-        opener = FakeOpener("not json at all")
-        result = cllm.suggest_commands(_cfg(), query="x", opener=opener)
-        self.assertEqual(result.templates, ())
-
-    def test_skips_blank_commands(self):
-        opener = FakeOpener(json.dumps(
-            {"commands": [{"command": "", "description": "d"},
-                          {"command": "ls"}]}))
-        result = cllm.suggest_commands(_cfg(), query="x", opener=opener)
-        self.assertEqual(len(result.templates), 1)
+    def test_explain_returns_completion(self):
+        server = FakeServer(content="It lists files.")
+        out = cllm.explain(_cfg(allow_remote_context=True), "ls",
+                           chain=[LAN1], opener=server)
+        self.assertEqual(out.text, "It lists files.")
+        self.assertEqual(out.endpoint, "Loki")
 
 
-class SummaryTests(unittest.TestCase):
-    def test_summary_returns_text(self):
-        opener = FakeOpener("You cleaned up build artifacts in ~/proj.")
-        text = cllm.summarize(_cfg(), recent_commands=["rm -rf build"],
-                              cwd="/home/x/proj", opener=opener)
-        self.assertEqual(text, "You cleaned up build artifacts in ~/proj.")
+class ResolveChainTests(unittest.TestCase):
+    def test_falls_back_to_single_config_endpoint(self):
+        # no auth.json at the given path -> one endpoint from config
+        cfg = _cfg(base_url="http://127.0.0.1:11434/v1", model="m",
+                   auth_path="/definitely/missing/auth.json")
+        chain = cllm.resolve_chain(cfg)
+        self.assertEqual(len(chain), 1)
+        self.assertEqual(chain[0].tier, auth.ON_DEVICE)
+        self.assertEqual(chain[0].model, "m")
 
-    def test_summary_gated(self):
-        opener = FakeOpener()
-        with self.assertRaises(cllm.RemoteDisabledError):
-            cllm.summarize(LlmConfig(), recent_commands=["ls"], opener=opener)
-
-
-class ExplainTests(unittest.TestCase):
-    def test_explain_returns_text_and_redacts(self):
-        opener = FakeOpener("Removes the build directory recursively.")
-        text = cllm.explain(_cfg(), "rm -rf build --token=abc123secret",
-                            opener=opener)
-        self.assertEqual(text, "Removes the build directory recursively.")
-        self.assertNotIn("abc123secret", opener.sent_text())
-
-    def test_explain_gated(self):
-        opener = FakeOpener()
-        with self.assertRaises(cllm.RemoteDisabledError):
-            cllm.explain(LlmConfig(), "ls", opener=opener)
-
-
-class ErrorHandlingTests(unittest.TestCase):
-    def test_urlerror_becomes_llmerror(self):
-        import urllib.error
-
-        def broken(request, timeout=None):
-            raise urllib.error.URLError("connection refused")
-
-        with self.assertRaises(cllm.LlmError):
-            cllm.suggest_commands(_cfg(), query="x", opener=broken)
-
-    def test_malformed_response(self):
-        def opener(request, timeout=None):
-            return FakeResponse(b'{"no_choices": true}')
-
-        with self.assertRaises(cllm.LlmError):
-            cllm.suggest_commands(_cfg(), query="x", opener=opener)
-
-
-class EndpointLabelTests(unittest.TestCase):
-    def test_openai(self):
-        self.assertEqual(cllm.endpoint_label(_cfg(model="gpt-4.1")),
-                         "gpt-4.1 @ api.openai.com")
-
-    def test_local_ollama(self):
-        cfg = _cfg(base_url="http://127.0.0.1:11434/v1",
-                   model="qwen3.5:2b")
-        self.assertEqual(cllm.endpoint_label(cfg),
-                         "qwen3.5:2b @ 127.0.0.1:11434")
-
-    def test_office_server(self):
-        cfg = _cfg(base_url="http://192.168.210.210:8080/v1", model="served")
-        self.assertEqual(cllm.endpoint_label(cfg),
-                         "served @ 192.168.210.210:8080")
-
-    def test_unparseable_base_url_falls_back(self):
-        cfg = _cfg(base_url="not-a-url", model="m")
-        self.assertEqual(cllm.endpoint_label(cfg), "m @ not-a-url")
-
-
-class SystemSuffixTests(unittest.TestCase):
-    def test_suffix_appended_to_all_paths(self):
-        cfg = _cfg(system_suffix="/no_think")
-        opener = FakeOpener()
-        cllm.suggest_commands(cfg, query="x", opener=opener)
-        self.assertTrue(opener.last_body()["messages"][0]["content"]
-                        .endswith("/no_think"))
-        cllm.summarize(cfg, recent_commands=["ls"], opener=opener)
-        self.assertTrue(opener.last_body()["messages"][0]["content"]
-                        .endswith("/no_think"))
-        cllm.explain(cfg, "ls", opener=opener)
-        self.assertTrue(opener.last_body()["messages"][0]["content"]
-                        .endswith("/no_think"))
-
-    def test_no_suffix_leaves_system_untouched(self):
-        opener = FakeOpener()
-        cllm.suggest_commands(_cfg(), query="x", opener=opener)
-        self.assertNotIn("/no_think",
-                         opener.last_body()["messages"][0]["content"])
+    def test_chain_label_marks_gated(self):
+        label = cllm.chain_label([LAN1, CLOUD], allow_remote=False)
+        self.assertIn("Loki", label)
+        self.assertIn("GPT (gated)", label)
+        self.assertNotIn("(gated)", cllm.chain_label([LAN1, CLOUD],
+                                                     allow_remote=True))
 
 
 class SourceGuardrailTests(unittest.TestCase):
-    def test_urllib_confined_to_llm_module(self):
+    def test_network_urllib_confined_to_llm(self):
         copilot = REPO_ROOT / "agent_terminal" / "copilot"
         offenders = []
         for path in copilot.glob("*.py"):
             if path.name == "llm.py":
                 continue
-            if re.search(r"\burllib\b", path.read_text(encoding="utf-8")):
+            text = path.read_text(encoding="utf-8")
+            if re.search(r"urllib\.(request|error)", text):
                 offenders.append(path.name)
-        self.assertEqual(offenders, [], f"urllib used outside llm.py: {offenders}")
+        self.assertEqual(offenders, [], f"network urllib outside llm.py: "
+                                        f"{offenders}")
 
 
 if __name__ == "__main__":

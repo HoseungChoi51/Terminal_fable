@@ -2630,6 +2630,9 @@ def build_native_classes(g):
             self._on_insert = on_insert
             self.on_activated = on_activated
             self._alive = True
+            self._chain = copilot_llm.resolve_chain(config)
+            self._eligible = copilot_llm.eligible_endpoints(
+                self._chain, config.allow_remote_context)
             self._build()
 
         def _build(self):
@@ -2642,11 +2645,10 @@ def build_native_classes(g):
             heading = Gtk.Label(label="Describe what you want to do")
             heading.set_xalign(0.0)
             heading.add_css_class("heading")
-            # Always show where a request would go (and whether it can).
-            endpoint = copilot_llm.endpoint_label(self._config)
-            if not self._config.allow_remote_context:
-                endpoint += " · remote off"
-            self._endpoint_label = Gtk.Label(label=endpoint)
+            # Always show the endpoint chain (local-first) and what is gated.
+            self._endpoint_label = Gtk.Label(
+                label=copilot_llm.chain_label(
+                    self._chain, self._config.allow_remote_context))
             self._endpoint_label.set_xalign(0.0)
             self._endpoint_label.add_css_class("intent-endpoint")
             ask_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -2681,12 +2683,20 @@ def build_native_classes(g):
             click.connect("pressed", lambda *_: (self.on_activated
                                                  and self.on_activated(self)))
             self.widget.add_controller(click)
-            if not self._config.allow_remote_context:
-                self._notice.set_text(
-                    "Remote assistant is off. Set "
-                    "assistant.llm.allow_remote_context to true in "
-                    "~/.config/agent-terminal/native.json to enable it. "
-                    "Context sent to the model is always redacted first.")
+            if not self._eligible:
+                # Every configured endpoint is the gated cloud model and
+                # the opt-in is off — or nothing is configured at all.
+                self._ask.set_sensitive(False)
+                if self._chain:
+                    self._notice.set_text(
+                        "Only the cloud model (OpenAI) is configured, and "
+                        "remote context is off. Set "
+                        "assistant.llm.allow_remote_context to true to use "
+                        "it. Context is always redacted before sending.")
+                else:
+                    self._notice.set_text(
+                        "No model endpoints configured. Add them to "
+                        "auth.json (see docs/copilot.md).")
 
         def focus(self):
             self._entry.grab_focus()
@@ -2708,11 +2718,12 @@ def build_native_classes(g):
             self._ask.set_sensitive(False)
             context = self._gather_context()
             config = self._config
+            chain = self._chain
 
             def work():
                 try:
                     result = copilot_llm.suggest_commands(
-                        config, query=query, **context)
+                        config, query=query, chain=chain, **context)
                     GLib.idle_add(self._show_result, result)
                 except copilot_llm.LlmError as exc:
                     GLib.idle_add(self._show_error, str(exc))
@@ -2734,12 +2745,14 @@ def build_native_classes(g):
             if not self._alive:
                 return GLib.SOURCE_REMOVE
             self._finish_request()
+            via = f"via {result.endpoint}" if result.endpoint else ""
             if not result.templates:
                 self._notice.set_text("No suggestions came back. Try "
                                       "rephrasing the goal.")
                 return GLib.SOURCE_REMOVE
-            if result.note:
-                self._notice.set_text(result.note)
+            self._notice.set_text(
+                f"{result.note}  ·  {via}".strip(" ·") if result.note
+                else via)
             for template in result.templates:
                 self._results.append(self._template_card(template))
             return GLib.SOURCE_REMOVE
@@ -2797,10 +2810,12 @@ def build_native_classes(g):
         def _explain(self, command, label):
             label.set_text("…")
             config = self._config
+            chain = self._chain
 
             def work():
                 try:
-                    text = copilot_llm.explain(config, command)
+                    text = copilot_llm.explain(config, command,
+                                               chain=chain).text
                 except copilot_llm.LlmError as exc:
                     text = str(exc)
                 GLib.idle_add(self._set_label, label, text)
@@ -4037,30 +4052,34 @@ def build_native_classes(g):
             self._summary_dialog = dialog
             heuristic = copilot_sessions.summarize(records, cwd)
             llm_config = self.options.native_config.assistant.llm
-            endpoint = copilot_llm.endpoint_label(llm_config)
-            if not llm_config.allow_remote_context:
+            chain = copilot_llm.resolve_chain(llm_config)
+            eligible = copilot_llm.eligible_endpoints(
+                chain, llm_config.allow_remote_context)
+            if not eligible:
+                # No usable model — show the instant heuristic summary.
                 label.set_text(heuristic)
-                source.set_text("heuristic summary · remote off")
+                source.set_text("heuristic summary · no model available")
                 dialog.present()
                 return
             label.set_text("Summarizing…")
-            source.set_text(endpoint)
+            source.set_text("local model…")
             dialog.present()
             recent = [r.cmd for r in records if r.cmd]
             project = os.path.basename(cwd.rstrip("/")) if cwd else None
 
             def work():
                 try:
-                    text = copilot_llm.summarize(
+                    completion = copilot_llm.summarize(
                         llm_config, cwd=cwd, project=project,
-                        recent_commands=recent)
-                    origin = endpoint
+                        recent_commands=recent, chain=chain)
+                    text = completion.text or heuristic
+                    origin = f"via {completion.endpoint}"
                 except copilot_llm.LlmError:
                     text = heuristic
-                    origin = f"heuristic summary · {endpoint} unreachable"
+                    origin = "heuristic summary · no model reachable"
 
                 def apply():
-                    label.set_text(text or heuristic)
+                    label.set_text(text)
                     source.set_text(origin)
                     return GLib.SOURCE_REMOVE
 

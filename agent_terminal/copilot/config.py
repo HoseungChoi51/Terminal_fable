@@ -53,6 +53,9 @@ class LlmConfig:
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4.1-mini"
     api_key_env: str = "OPENAI_API_KEY"
+    # Path to auth.json (endpoint chain + keys). None -> search the
+    # standard locations (env AGENT_TERMINAL_AUTH_JSON, the config dir).
+    auth_path: str | None = None
     allow_remote_context: bool = False
     send_output: bool = False
     timeout_s: int = 30

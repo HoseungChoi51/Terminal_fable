@@ -1,16 +1,19 @@
-"""LLM provider and the single gated, redacting remote choke point.
+"""LLM providers and the gated, redacting choke point (local-first).
 
-Everything that leaves the machine passes through here. Two rules hold
-unconditionally, enforced in this module and covered by tests:
+Everything that leaves the process passes through here. The invariants,
+enforced in this module and covered by tests:
 
-1. Nothing is sent unless ``allow_remote_context`` is true (ContextGate).
-2. Every payload is run through secret redaction first, regardless of
-   any other setting.
+1. Context is redacted before it is ever sent, unconditionally.
+2. An *internet* endpoint is contacted only when ``allow_remote_context``
+   is true. On-device and LAN endpoints are trusted and used freely, so
+   the copilot works locally without the opt-in; the internet (e.g.
+   OpenAI) is only ever a last-resort fallback.
+3. Endpoints are tried most-private first (the chain from auth.json,
+   already ordered); on failure the next eligible one is tried.
 
-The client speaks the OpenAI chat-completions API against a configurable
-base URL, so the same code targets OpenAI now and a local
-OpenAI-compatible server (Ollama, llama.cpp, vLLM) later by config alone.
-``urllib`` is imported only here (a source guardrail test pins that).
+Secrets (API keys from auth.json) are placed in the Authorization header
+only and never appear in the request body, the context, logs, or error
+messages. ``urllib`` is imported only here (a source guardrail pins it).
 """
 
 from __future__ import annotations
@@ -20,22 +23,25 @@ import os
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
+from agent_terminal.copilot import auth
 from agent_terminal.copilot import redact
 from agent_terminal.copilot import risk as risk_mod
 
 _PLACEHOLDER = re.compile(r"<[a-z0-9_]+>")
 _MAX_RECENT = 12
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
 
 
 class LlmError(Exception):
-    """Any failure reaching or parsing the model."""
+    """Any failure reaching or parsing a model."""
 
 
 class RemoteDisabledError(LlmError):
-    """Raised when a remote call is attempted while the gate is closed."""
+    """No endpoint may be used: all are gated and remote context is off."""
 
 
 @dataclass(frozen=True)
@@ -50,30 +56,65 @@ class Template:
 class IntentResult:
     templates: tuple[Template, ...]
     note: str = ""
+    endpoint: str = ""
 
 
-# -- gate ---------------------------------------------------------------
-
-def endpoint_label(config) -> str:
-    """Human-readable "model @ host" for showing where requests go."""
-    host = urlsplit(config.base_url).netloc or config.base_url
-    return f"{config.model} @ {host}"
+@dataclass(frozen=True)
+class Completion:
+    text: str
+    endpoint: str = ""
 
 
-class ContextGate:
-    """The one place that decides whether anything may go remote."""
+# -- endpoint chain resolution ------------------------------------------
 
-    def __init__(self, config):
-        self.config = config
+def resolve_chain(config) -> list[auth.Endpoint]:
+    """The ordered endpoint chain from auth.json, else a single config one.
 
-    def allowed(self) -> bool:
-        return bool(self.config.allow_remote_context)
+    Internet endpoints inherit the config's default model and, if
+    keyless, the key from ``api_key_env``. LAN endpoints keep model=None
+    so it is discovered from the server at call time.
+    """
+    endpoints = auth.load_from_candidates(
+        repo_root=_REPO_ROOT) if config.auth_path is None else \
+        auth.load_endpoints(config.auth_path)
+    if not endpoints:
+        endpoints = [auth.Endpoint(
+            label=config.model, base_url=config.base_url,
+            tier=auth.classify_host(config.base_url),
+            api_key=os.environ.get(config.api_key_env), model=config.model)]
+    resolved = []
+    for endpoint in endpoints:
+        changes = {}
+        if endpoint.tier == auth.INTERNET:
+            if not endpoint.api_key:
+                changes["api_key"] = os.environ.get(config.api_key_env)
+            if not endpoint.model:
+                changes["model"] = config.model
+        resolved.append(endpoint.with_(**changes) if changes else endpoint)
+    return resolved
 
-    def ensure_allowed(self):
-        if not self.allowed():
-            raise RemoteDisabledError(
-                "remote context is disabled "
-                "(set assistant.llm.allow_remote_context to enable)")
+
+def eligible_endpoints(chain, allow_remote) -> list[auth.Endpoint]:
+    """Endpoints usable given the gate: internet only when opted in."""
+    return [e for e in chain if allow_remote or not e.gated()]
+
+
+def chain_label(chain, allow_remote) -> str:
+    """Compact description of the chain for the UI (no secrets)."""
+    if not chain:
+        return "no endpoints configured"
+    parts = []
+    for endpoint in chain:
+        mark = "" if (allow_remote or not endpoint.gated()) else " (gated)"
+        parts.append(endpoint.label + mark)
+    return " → ".join(parts)
+
+
+def endpoint_label(endpoint) -> str:
+    """"model @ host" for a single endpoint (no secret)."""
+    host = urlsplit(endpoint.base_url).netloc or endpoint.base_url
+    model = endpoint.model or "?"
+    return f"{model} @ {host}"
 
 
 # -- context assembly (always redacted) ---------------------------------
@@ -142,44 +183,73 @@ def summary_messages(context, suffix=""):
             {"role": "user", "content": context}]
 
 
+def explain_messages(command, suffix=""):
+    return [{"role": "system", "content": _system(_EXPLAIN_SYSTEM, suffix)},
+            {"role": "user", "content": redact.redact_line(command)[0]}]
+
+
 # -- provider -----------------------------------------------------------
 
 class OpenAIProvider:
-    """Minimal OpenAI-compatible chat client over urllib."""
+    """Minimal OpenAI-compatible chat client for one endpoint."""
 
-    def __init__(self, config, opener=None):
-        self.config = config
+    def __init__(self, endpoint, *, model=None, timeout_s=30, opener=None):
+        self.endpoint = endpoint
+        self.model = model or endpoint.model
+        self.timeout_s = timeout_s
         self._opener = opener or urllib.request.urlopen
 
+    def _request(self, path, body):
+        url = self.endpoint.base_url.rstrip("/") + path
+        headers = {"Content-Type": "application/json"}
+        if self.endpoint.api_key:
+            headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
+        request = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8") if body else None,
+            headers=headers, method="POST" if body else "GET")
+        try:
+            with self._opener(request, timeout=self.timeout_s) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise LlmError(f"HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise LlmError(f"unreachable: {exc.reason}") from exc
+        except (ValueError, OSError) as exc:
+            raise LlmError(f"bad response: {exc}") from exc
+
+    def discover_model(self):
+        payload = self._request("/models", None)
+        try:
+            return payload["data"][0]["id"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LlmError("no models advertised") from exc
+
     def complete(self, messages, *, json_mode=False) -> str:
-        url = self.config.base_url.rstrip("/") + "/chat/completions"
-        body = {"model": self.config.model, "messages": messages,
+        body = {"model": self.model or "default", "messages": messages,
                 "temperature": 0.2}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
-        headers = {"Content-Type": "application/json"}
-        key = os.environ.get(self.config.api_key_env)
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(
-            url, data=json.dumps(body).encode("utf-8"),
-            headers=headers, method="POST")
-        try:
-            with self._opener(request,
-                              timeout=self.config.timeout_s) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise LlmError(f"HTTP {exc.code} from model endpoint") from exc
-        except urllib.error.URLError as exc:
-            raise LlmError(f"cannot reach model endpoint: {exc.reason}") \
-                from exc
-        except (ValueError, OSError) as exc:
-            raise LlmError(f"bad response from model endpoint: {exc}") \
-                from exc
+        payload = self._request("/chat/completions", body)
         try:
             return payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LlmError("malformed model response") from exc
+
+
+# Discovered model per base_url, so LAN servers are queried once.
+_MODEL_CACHE: dict = {}
+
+
+def _resolve_model(endpoint, timeout_s, opener):
+    if endpoint.model:
+        return endpoint.model
+    cached = _MODEL_CACHE.get(endpoint.base_url)
+    if cached:
+        return cached
+    provider = OpenAIProvider(endpoint, timeout_s=timeout_s, opener=opener)
+    model = provider.discover_model()   # raises LlmError -> caller falls on
+    _MODEL_CACHE[endpoint.base_url] = model
+    return model
 
 
 # -- response parsing ---------------------------------------------------
@@ -221,33 +291,54 @@ def parse_intent_response(text) -> IntentResult:
     return IntentResult(tuple(templates), note)
 
 
-# -- orchestration (gate + redact + call + parse) -----------------------
+# -- orchestration (resolve chain + gate + redact + fallback + parse) ----
+
+def _run_chain(config, messages, *, json_mode, chain=None, opener=None):
+    """Try each eligible endpoint most-private first; return (text, label)."""
+    chain = chain if chain is not None else resolve_chain(config)
+    usable = eligible_endpoints(chain, bool(config.allow_remote_context))
+    if not usable:
+        raise RemoteDisabledError(
+            "no local model is available and the cloud model is disabled "
+            "(set assistant.llm.allow_remote_context to enable it)")
+    errors = []
+    for endpoint in usable:
+        try:
+            model = _resolve_model(endpoint, config.timeout_s, opener)
+            text = OpenAIProvider(
+                endpoint, model=model, timeout_s=config.timeout_s,
+                opener=opener).complete(messages, json_mode=json_mode)
+            return text, endpoint.label
+        except LlmError as exc:
+            errors.append(f"{endpoint.label}: {exc}")
+    raise LlmError("all endpoints failed (" + "; ".join(errors) + ")")
+
 
 def suggest_commands(config, *, query, cwd=None, project=None,
-                     recent_commands=(), opener=None) -> IntentResult:
-    ContextGate(config).ensure_allowed()
+                     recent_commands=(), chain=None,
+                     opener=None) -> IntentResult:
     context = build_context(cwd=cwd, project=project,
                             recent_commands=recent_commands)
-    text = OpenAIProvider(config, opener=opener).complete(
-        intent_messages(query, context, config.system_suffix),
-        json_mode=True)
-    return parse_intent_response(text)
+    text, label = _run_chain(
+        config, intent_messages(query, context, config.system_suffix),
+        json_mode=True, chain=chain, opener=opener)
+    return replace(parse_intent_response(text), endpoint=label)
 
 
 def summarize(config, *, cwd=None, project=None, recent_commands=(),
-              output_tails=None, opener=None) -> str:
-    ContextGate(config).ensure_allowed()
+              output_tails=None, chain=None, opener=None) -> Completion:
     context = build_context(cwd=cwd, project=project,
                             recent_commands=recent_commands,
                             output_tails=output_tails,
                             send_output=config.send_output)
-    return OpenAIProvider(config, opener=opener).complete(
-        summary_messages(context, config.system_suffix)).strip()
+    text, label = _run_chain(
+        config, summary_messages(context, config.system_suffix),
+        json_mode=False, chain=chain, opener=opener)
+    return Completion(text.strip(), label)
 
 
-def explain(config, command, *, opener=None) -> str:
-    ContextGate(config).ensure_allowed()
-    messages = [{"role": "system",
-                 "content": _system(_EXPLAIN_SYSTEM, config.system_suffix)},
-                {"role": "user", "content": redact.redact_line(command)[0]}]
-    return OpenAIProvider(config, opener=opener).complete(messages).strip()
+def explain(config, command, *, chain=None, opener=None) -> Completion:
+    text, label = _run_chain(
+        config, explain_messages(command, config.system_suffix),
+        json_mode=False, chain=chain, opener=opener)
+    return Completion(text.strip(), label)
