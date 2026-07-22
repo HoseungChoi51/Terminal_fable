@@ -782,12 +782,12 @@ class SourceGuardrailTests(unittest.TestCase):
         switch = SOURCE.split("def _on_switch_page(", 1)[1][:500]
         self.assertIn("self._ask_close()", switch)
 
-    def test_status_bar_and_model_toggle_wired(self):
+    def test_status_bar_and_model_picker_wired(self):
         self.assertIn("copilot-model", nt.ACTION_NAMES)
         self.assertIn("<Ctrl><Shift>m", nt.ACCELERATORS["copilot-model"])
         self.assertIn("def _build_status_bar(self)", SOURCE)
         self.assertIn("def _copilot_status_text(self", SOURCE)
-        self.assertIn("def toggle_copilot_model(self)", SOURCE)
+        self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
 

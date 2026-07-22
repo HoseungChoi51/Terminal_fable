@@ -3202,8 +3202,9 @@ def build_native_classes(g):
             # which builds the status bar).
             self._ask_token = None       # identity of the open ask session
             self._ask_close = None       # teardown closure for the open bar
-            self._status_expanded = False
             self._copilot_chain_cache = None
+            self._pinned_model = None     # model chosen via the picker
+            self._model_dialog = None
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3307,7 +3308,8 @@ def build_native_classes(g):
             self.set_child(box)
 
         def _resolve_copilot_chain(self):
-            """(chain, eligible) for the copilot, resolved once and cached."""
+            """(chain, eligible) for the copilot; endpoints cached, the chosen
+            model applied fresh so a pick takes effect immediately."""
             cache = getattr(self, "_copilot_chain_cache", None)
             if cache is None:
                 llm_cfg = self.options.native_config.assistant.llm
@@ -3315,7 +3317,14 @@ def build_native_classes(g):
                 cache = (chain, copilot_llm.eligible_endpoints(
                     chain, llm_cfg.allow_remote_context))
                 self._copilot_chain_cache = cache
-            return cache
+            chain, eligible = cache
+            pinned = getattr(self, "_pinned_model", None)
+            if pinned and eligible:
+                # Pin the chosen model on the primary usable endpoint.
+                primary = eligible[0].with_(model=pinned)
+                chain = [primary if e is eligible[0] else e for e in chain]
+                eligible = [primary, *eligible[1:]]
+            return chain, eligible
 
         def _copilot_status_text(self, expand=False):
             """Status-bar text: the attached model, abbreviated or full."""
@@ -3330,8 +3339,11 @@ def build_native_classes(g):
                     chain, assistant.llm.allow_remote_context)
             if not eligible:
                 return "copilot: cloud only (gated)"
-            # Abbreviated: the primary endpoint's first word (e.g. "Loki").
-            return "copilot: " + (eligible[0].label.split() or ["?"])[0]
+            # Abbreviated: the chosen model, else the primary endpoint's
+            # first word (e.g. "centinel").
+            primary = eligible[0]
+            return "copilot: " + (primary.model
+                                  or (primary.label.split() or ["?"])[0])
 
         def _build_status_bar(self):
             bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3342,9 +3354,14 @@ def build_native_classes(g):
             self._status_model.set_hexpand(True)
             self._status_model.set_ellipsize(Pango.EllipsizeMode.END)
             self._status_model.set_selectable(True)
+            self._status_model.set_selectable(False)
             self._status_model.add_css_class("status-model")
             self._status_model.set_tooltip_text(
-                "Copilot model — Ctrl+Shift+M for the full chain")
+                "Copilot model — click or Ctrl+Shift+M to choose")
+            click = Gtk.GestureClick()
+            click.connect("pressed",
+                          lambda *_: self.show_model_picker())
+            self._status_model.add_controller(click)
             hint = Gtk.Label(label="Ctrl+?  ask")
             hint.add_css_class("status-hint")
             bar.append(self._status_model)
@@ -3357,17 +3374,132 @@ def build_native_classes(g):
             model = getattr(self, "_status_model", None)
             if model is None:
                 return
-            model.set_text(
-                "⌁ " + self._copilot_status_text(self._status_expanded))
+            model.set_text("⌁ " + self._copilot_status_text())
             active = getattr(self, "_ask_token", None) is not None
             setter = (self._status_bar.add_css_class if active
                       else self._status_bar.remove_css_class)
             setter("ask-active")
 
-        def toggle_copilot_model(self):
-            """Expand/collapse the status-bar model to the full chain."""
-            self._status_expanded = not self._status_expanded
-            self._refresh_status()
+        def show_model_picker(self):
+            """Dialog to choose which model the copilot uses (Ctrl+Shift+M).
+
+            Lists the models the primary endpoint advertises (discovered on a
+            worker thread); picking one pins it for the session. A dialog
+            (not a popover) so it survives the async discovery cleanly.
+            """
+            llm_cfg = self.options.native_config.assistant.llm
+            chain, eligible = self._resolve_copilot_chain()
+            dialog = Gtk.Window()
+            self._model_dialog = dialog
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Copilot Model")
+            dialog.set_default_size(400, 340)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(14)
+            box.set_margin_bottom(14)
+            box.set_margin_start(14)
+            box.set_margin_end(14)
+            chain_lbl = Gtk.Label(label=copilot_llm.chain_label(
+                chain, llm_cfg.allow_remote_context))
+            chain_lbl.set_xalign(0.0)
+            chain_lbl.set_wrap(True)
+            chain_lbl.add_css_class("intent-endpoint")
+            box.append(chain_lbl)
+            close_button = Gtk.Button(label="Close")
+            close_button.connect("clicked", lambda *_: dialog.close())
+
+            def alive():
+                return dialog.get_visible()
+
+            def choose(model):
+                self._pinned_model = model
+                self._refresh_status()
+                dialog.close()
+
+            if not eligible:
+                note = Gtk.Label(label="No usable model — check auth.json or "
+                                 "enable assistant.llm.allow_remote_context.")
+                note.set_wrap(True)
+                note.set_xalign(0.0)
+                note.add_css_class("intent-notice")
+                box.append(note)
+                box.append(close_button)
+                dialog.set_child(box)
+                self._close_on_escape(dialog)
+                dialog.present()
+                return
+
+            primary = eligible[0]
+            current = primary.model
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                               Gtk.PolicyType.AUTOMATIC)
+            scroller.set_child(listbox)
+            spinner = Gtk.Spinner()
+            spinner.start()
+            box.append(spinner)
+            box.append(scroller)
+            box.append(close_button)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+
+            def add_row(text, model, is_current):
+                row = Gtk.ListBoxRow()
+                lbl = Gtk.Label(label=("●  " if is_current else "    ") + text)
+                lbl.set_xalign(0.0)
+                lbl.add_css_class("copilot-cmd")
+                row.set_child(lbl)
+                row._model = model
+                listbox.append(row)
+
+            listbox.connect("row-activated",
+                            lambda _b, row: choose(getattr(row, "_model",
+                                                           None)))
+
+            def show_models(models):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                for name in models:
+                    add_row(f"{name}   (on {primary.label})", name,
+                            name == current)
+                if not models:
+                    add_row("(no models advertised)", current, True)
+                return GLib.SOURCE_REMOVE
+
+            def show_error(message):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                err = Gtk.Label(label=f"Couldn't list models: {message}\n"
+                                "Type a model name to use it:")
+                err.set_wrap(True)
+                err.set_xalign(0.0)
+                err.add_css_class("intent-notice")
+                entry = Gtk.Entry()
+                entry.set_placeholder_text("model name…")
+                if current:
+                    entry.set_text(current)
+                entry.connect("activate",
+                              lambda e: choose(e.get_text().strip() or None))
+                box.insert_child_after(err, spinner)
+                box.insert_child_after(entry, err)
+                entry.grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def work():
+                try:
+                    models = copilot_llm.list_models(llm_cfg, primary)
+                    GLib.idle_add(show_models, models)
+                except copilot_llm.LlmError as exc:
+                    GLib.idle_add(show_error, str(exc))
+
+            threading.Thread(target=work, daemon=True).start()
+            dialog.present()
 
         def _install_actions(self):
             for name in ACTION_NAMES + TAB_ACTION_NAMES:
@@ -3898,7 +4030,7 @@ def build_native_classes(g):
             elif name == "copilot-ask":
                 self.show_ask_overlay()
             elif name == "copilot-model":
-                self.toggle_copilot_model()
+                self.show_model_picker()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -3963,6 +4095,10 @@ def build_native_classes(g):
             """
             pane = self._active_pane()
             if pane is None or pane.kind != "terminal":
+                # Active pane is a viewer (e.g. the Copilot Journal); target
+                # the tab's terminal instead so Ctrl+? still opens.
+                pane = self._recent_terminal_pane()
+            if pane is None:
                 return
             ask_cfg = self.options.native_config.assistant.ask
             if not ask_cfg.enabled:
@@ -4315,15 +4451,22 @@ def build_native_classes(g):
                 GLib.idle_add(
                     lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
 
+        def _recent_terminal_pane(self):
+            """The terminal an assistant action should target — the recent
+            one, or any terminal in the tab, even when a viewer/journal pane
+            is the active/focused pane."""
+            tab = self.active_tab()
+            if tab is None:
+                return None
+            pane = tab.panes.get(getattr(tab, "_recent_terminal_id", None))
+            if pane is not None and pane.kind == "terminal":
+                return pane
+            return next((p for p in tab.panes.values()
+                         if p.kind == "terminal"), None)
+
         def _assistant_context(self):
             """cwd + project + recent commands from the recent terminal pane."""
-            tab = self.active_tab()
-            pane = None
-            if tab is not None:
-                pane = tab.panes.get(tab._recent_terminal_id)
-                if pane is None or pane.kind != "terminal":
-                    pane = next((p for p in tab.panes.values()
-                                 if p.kind == "terminal"), None)
+            pane = self._recent_terminal_pane()
             cwd, recent = None, []
             if pane is not None:
                 try:

@@ -112,8 +112,11 @@ language model, both **off by default** and gated:
   `assistant.ask.auto_pilot` (off by default).
 
   A **status bar** along the window bottom always shows the attached
-  model, abbreviated (e.g. `⌁ copilot: Loki`); press **Ctrl+Shift+M** to
-  expand it to the full local-first chain and back.
+  model, abbreviated (e.g. `⌁ copilot: loki`). Click it or press
+  **Ctrl+Shift+M** to open the **model picker** — it shows the full
+  local-first chain and lists the models the primary endpoint advertises
+  (e.g. a LiteLLM gateway fronting several backends); pick one to pin it
+  for the session.
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.
