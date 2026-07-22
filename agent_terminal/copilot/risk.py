@@ -179,22 +179,13 @@ def _classify_find(args) -> str:
         return DESTRUCTIVE
     for flag in _FIND_EXEC:
         if flag in args:
-            inner, placeholder = [], False
-            for tok in args[args.index(flag) + 1:]:
-                if tok in _FIND_EXEC_TERM:
-                    break
-                if tok == "{}":
-                    placeholder = True
-                else:
-                    inner.append(tok)
-            if not inner:
-                return DESTRUCTIVE
-            grade = _classify_segment(inner)
-            # A mutating inner applied to {} rewrites every match, an
-            # unbounded fileset — scale it up from local-change.
-            if placeholder and grade == LOCAL_CHANGE:
-                return DESTRUCTIVE
-            return grade
+            # Grade by the inner command (rm → destructive, grep →
+            # read-only). We can't tell whether {} is the inner's target
+            # (cp /dev/null {}) or source (cp {} dir/), so don't escalate;
+            # find is not auto-run-safe anyway, so this is badge-only.
+            inner = [tok for tok in args[args.index(flag) + 1:]
+                     if tok not in _FIND_EXEC_TERM and tok != "{}"]
+            return _classify_segment(inner) if inner else DESTRUCTIVE
     if any(a.startswith(_FIND_WRITE) for a in args):
         return DESTRUCTIVE
     return READ_ONLY
@@ -306,23 +297,30 @@ def classify(command) -> RiskResult:
 #
 # classify() is a denylist and will always have gaps (a destructive command
 # it has not learned grades low). For *unattended execution* that is not
-# good enough, so auto-run is gated by an allowlist as well: only commands
-# whose every segment is a known-safe program run without a keystroke. A
-# classifier miss then costs at most a wrong badge, never an auto-run.
+# good enough, so auto-run is gated by an allowlist as well: a command runs
+# without a keystroke only if every segment leads with a program on this
+# list. A classifier miss then costs at most a wrong badge, never an
+# auto-run.
 #
-# Curated (not derived from _READ_ONLY): `find` is excluded — its flags
-# (-delete/-exec/-fprint) make it a footgun whose safety would again depend
-# on the classifier — and pagers / interactive programs (less, more, man,
-# top, htop) are excluded because they would block an unattended run. The
-# set is deliberately small; broaden it only with evidence a program is
-# safe to run unattended.
+# Membership criterion is strict: a program qualifies only if it is safe
+# under *every* flag — it can never write to a file, exec another program,
+# or block indefinitely, no matter how it is invoked. That is what lets the
+# gate ignore arguments (which are per-program and overloaded — `-o` is an
+# output file to `sort` but an output *format* to `ps`, so a flag denylist
+# cannot work). Anything dual-use is therefore excluded, even though it
+# reads by default:
+#   sort (-o, --compress-program=CMD → writes / execs), uniq (2nd
+#   positional is an O_TRUNC output file), tree (-o FILE), file (-C writes
+#   a compiled magic file), tail (-f blocks), fd/rg/ag (--exec/--pre run a
+#   command), find (-delete/-exec/-fprint), dmesg (-C clears the log), and
+#   all pagers / interactive programs (less, more, man, top, htop).
+# Broaden this only after verifying a program has no such flag.
 _AUTORUN_ALLOWLIST = frozenset({
-    "ls", "ll", "la", "cat", "head", "tail", "grep", "egrep", "rg", "ag",
-    "fd", "du", "df", "ps", "pwd", "echo", "which", "type", "printenv",
-    "env", "wc", "sort", "uniq", "cut", "tr", "stat", "file", "tree",
+    "ls", "cat", "head", "grep", "egrep", "wc", "cut", "tr", "du", "df",
+    "ps", "pwd", "echo", "which", "type", "printenv", "env", "stat",
     "date", "whoami", "id", "uname", "hostname", "history", "jobs", "free",
-    "uptime", "lsblk", "lsusb", "lspci", "dmesg", "who", "w", "column",
-    "mkdir", "touch",   # the only mutating programs, and both are safe
+    "uptime", "lsblk", "lsusb", "lspci", "who", "w", "column",
+    "mkdir", "touch",   # the only mutating programs, and neither destroys
 })
 _AUTORUN_METACHARS = re.compile(r"\$\(|`|[<>]")
 

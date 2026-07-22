@@ -43,10 +43,15 @@ pure `AskSession` state machine in the GTK-free core
   (`risk.auto_run_safe`). The classifier is a denylist and will always
   have gaps, so it is not trusted alone for unattended execution: a
   command auto-runs only when every pipeline segment leads with a program
-  on a small curated safe list (read-only utilities plus `mkdir`/`touch`;
-  `find`, pagers, and interactive programs are deliberately excluded) and
-  it contains no substitution or redirection. A classifier miss then
-  costs at most a wrong badge, never an auto-run.
+  on a small curated safe list and it contains no substitution or
+  redirection. The list admits a program only if it is safe under
+  *every* flag — it can never write a file, exec another program, or
+  block — which is what lets the gate ignore arguments (flags are
+  per-program and overloaded, so a flag denylist can't work). That
+  excludes dual-use readers like `sort` (`-o`/`--compress-program`),
+  `uniq` (positional output), `tree`/`file`, `tail -f`, `fd`/`rg`, and
+  `find`, alongside pagers and interactive programs. A classifier miss
+  then costs at most a wrong badge, never an auto-run.
 - **One guarded submit path.** `_ask_commit` is the single place in the
   app that may feed a submit byte (`\r`), and only under `if run:`. A
   source-guardrail test forbids any other newline/CR feed.

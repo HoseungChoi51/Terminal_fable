@@ -170,11 +170,12 @@ class RiskTests(unittest.TestCase):
         # a plain branch switch stays local-change
         self.assertRisk("git switch main", crisk.LOCAL_CHANGE)
 
-    def test_find_exec_mutating_inner_over_matches_is_destructive(self):
-        self.assertRisk("find . -exec cp /dev/null {} +", crisk.DESTRUCTIVE)
-        self.assertRisk("find . -type f -exec tee {} ;", crisk.DESTRUCTIVE)
-        # a read-only inner stays read-only
+    def test_find_exec_graded_by_inner(self):
+        # Graded by the inner command; not escalated (can't tell whether {}
+        # is the inner's source or target, and find never auto-runs anyway).
         self.assertRisk("find . -exec grep TODO {} ;", crisk.READ_ONLY)
+        self.assertRisk("find . -exec rm {} +", crisk.DESTRUCTIVE)
+        self.assertRisk("find . -exec cp {} /backup/ ;", crisk.LOCAL_CHANGE)
 
     def test_unknown(self):
         self.assertRisk("frobnicate --wibble", crisk.UNKNOWN)
@@ -191,8 +192,9 @@ class RiskTests(unittest.TestCase):
 class AutoRunSafeTests(unittest.TestCase):
     def test_allowlisted_programs(self):
         for cmd in ("ls -la", "grep -rn x .", "cat f", "du -sh *",
-                    "mkdir -p a/b", "touch f", "ls | grep x | sort",
-                    "env FOO=1 ls", "timeout 5 ls", "echo hi"):
+                    "mkdir -p a/b", "touch f", "ls | grep x | cut -f1",
+                    "env FOO=1 ls", "timeout 5 ls", "echo hi", "ps aux",
+                    "wc -l f", "stat f", "df -h"):
             self.assertTrue(crisk.auto_run_safe(cmd), cmd)
 
     def test_non_allowlisted_programs(self):
@@ -200,6 +202,14 @@ class AutoRunSafeTests(unittest.TestCase):
                     "rm f", "apt install x", "docker ps", "sudo ls",
                     "curl x", "make", "find . -name x", "less f",
                     "top", "unknowncmd"):
+            self.assertFalse(crisk.auto_run_safe(cmd), cmd)
+
+    def test_dual_use_readonly_tools_excluded(self):
+        # These read by default but can write a file / exec / hang under a
+        # flag, so they are NOT auto-run-safe (the round-4 bypasses).
+        for cmd in ("sort -o f g", "sort --compress-program=x f",
+                    "uniq a b", "tree -o out .", "tail -f log", "file -C",
+                    "rg --pre x pat", "fd -x rm", "ag x"):
             self.assertFalse(crisk.auto_run_safe(cmd), cmd)
 
     def test_metacharacters_block(self):
