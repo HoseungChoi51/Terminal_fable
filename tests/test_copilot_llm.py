@@ -216,6 +216,25 @@ class RedactionAndSecretTests(unittest.TestCase):
         sent = json.dumps(server.chat_bodies()[0])
         self.assertNotIn("secretDRAFTkeymaterial", sent)
 
+    def test_explain_drops_multiline_pem_block(self):
+        heredoc = ("cat <<EOF\n-----BEGIN PRIVATE KEY-----\n"
+                   "MIIsecretEXPLAINkeymaterial\n-----END PRIVATE KEY-----"
+                   "\nEOF")
+        server = FakeServer()
+        cllm.explain(_cfg(allow_remote_context=True), heredoc,
+                     chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("secretEXPLAINkeymaterial", sent)
+
+    def test_multiline_query_drops_pem_block(self):
+        query = ("please run this:\n-----BEGIN PRIVATE KEY-----\n"
+                 "MIIsecretQUERYkeymaterial\n-----END PRIVATE KEY-----")
+        server = FakeServer(content='{"commands":[]}')
+        cllm.suggest_commands(_cfg(allow_remote_context=True), query=query,
+                              chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("secretQUERYkeymaterial", sent)
+
 
 class IntentAndExplainTests(unittest.TestCase):
     def setUp(self):

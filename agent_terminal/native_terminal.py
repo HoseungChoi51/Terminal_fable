@@ -3987,9 +3987,11 @@ def build_native_classes(g):
                     notice.set_text(result.note)
                 add_answer_card(session.last_answer())
                 # Move focus to the answer card so Y/N/T act on it (armed
-                # only while the entry is unfocused); the user clicks the
-                # entry to type a follow-up.
-                if state["card"] is not None:
+                # only while the entry is unfocused). But if the user typed
+                # ahead a follow-up while the model was thinking, leave focus
+                # (and their text) in the entry — never yank it mid-word into
+                # the hotkeys, where the next keystroke could take/cancel.
+                if state["card"] is not None and not entry.get_text():
                     state["card"].grab_focus()
                 return GLib.SOURCE_REMOVE
 

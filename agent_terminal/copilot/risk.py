@@ -110,6 +110,8 @@ def _classify_segment(tokens) -> str:
         inner = _peel_wrapper(name, args)
         if inner:
             return _classify_segment(inner)
+        if name == "env":
+            return READ_ONLY   # bare `env` just prints the environment
 
     if name in ("rm", "rmdir"):
         return DESTRUCTIVE
@@ -117,11 +119,16 @@ def _classify_segment(tokens) -> str:
         return DESTRUCTIVE
     if name in _DESTRUCTIVE_COMMANDS:
         return DESTRUCTIVE
-    if name == "find" and ("-delete" in args
-                           or any(a.startswith(("-exec", "-ok"))
-                                  for a in args)):
-        # find … -delete / -exec rm … runs destructive work per match.
-        return DESTRUCTIVE
+    if name == "find":
+        return _classify_find(args)
+    if name == "sed" and any(a == "-i" or a.startswith("-i")
+                             or a == "--in-place" for a in args):
+        return DESTRUCTIVE   # in-place edit rewrites the target file
+    if name in ("chmod", "chown") and any(
+            a in ("-R", "--recursive")
+            or (a.startswith("-") and not a.startswith("--") and "R" in a)
+            for a in args):
+        return DESTRUCTIVE   # recursive perms/ownership can brick a tree
     if name in ("kubectl", "helm") and "delete" in args:
         return DESTRUCTIVE
     if name == "terraform" and any(a in ("destroy", "apply") for a in args):
@@ -154,6 +161,34 @@ def _classify_segment(tokens) -> str:
     if name in _LOCAL_CHANGE:
         return LOCAL_CHANGE
     return UNKNOWN
+
+
+# find primitives that open a named file for writing (O_TRUNC) up front.
+_FIND_WRITE = ("-fprint", "-fprintf", "-fprint0", "-fls")
+_FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+_FIND_EXEC_TERM = frozenset({";", "\\;", "+"})
+
+
+def _classify_find(args) -> str:
+    """find is read-only unless it deletes, writes a file, or runs a command.
+
+    An -exec/-ok clause is graded by its inner command, so `find … -exec
+    grep …` stays read-only while `find … -exec rm …` is destructive.
+    """
+    if "-delete" in args:
+        return DESTRUCTIVE
+    for flag in _FIND_EXEC:
+        if flag in args:
+            inner = []
+            for tok in args[args.index(flag) + 1:]:
+                if tok in _FIND_EXEC_TERM:
+                    break
+                if tok != "{}":
+                    inner.append(tok)
+            return _classify_segment(inner) if inner else DESTRUCTIVE
+    if any(a.startswith(_FIND_WRITE) for a in args):
+        return DESTRUCTIVE
+    return READ_ONLY
 
 
 _GIT_READ_ONLY = frozenset({
@@ -191,7 +226,8 @@ def _tool_default(name) -> str:
 
 
 def _git_is_destructive(args) -> bool:
-    joined = " ".join(args)
+    subs = [a for a in args if not a.startswith("-")]
+    first = subs[0] if subs else ""
     if "reset" in args and "--hard" in args:
         return True
     if "clean" in args and any("f" in a for a in args if a.startswith("-")):
@@ -199,6 +235,18 @@ def _git_is_destructive(args) -> bool:
     if "branch" in args and "-D" in args:
         return True
     if "push" in args and ("--force" in args or "-f" in args):
+        return True
+    # Working-tree / history discards that grade "local-change" otherwise.
+    if first == "reflog" and ("expire" in subs or "delete" in subs):
+        return True
+    if first == "restore":                       # discards worktree changes
+        return True
+    if first == "checkout" and ("." in args or "--" in args):
+        return True                              # pathspec checkout overwrites
+    if first == "stash" and ("drop" in subs or "clear" in subs):
+        return True
+    if first == "worktree" and "remove" in subs and (
+            "--force" in args or "-f" in args):
         return True
     return False
 

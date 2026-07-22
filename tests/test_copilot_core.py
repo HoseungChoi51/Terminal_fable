@@ -194,6 +194,15 @@ class JournalTests(unittest.TestCase):
         self.assertIsNone(record.cmd)
         self.assertEqual(record.capture, cjournal.CAPTURE_NONE)
 
+    def test_output_tail_drops_pem_split_by_window(self):
+        # The private-key BEGIN sits just above the 2-line tail window; the
+        # margin read must still recognize and drop the whole block.
+        pem = ("-----BEGIN PRIVATE KEY-----", "MIISECRETkeybodyONE",
+               "MIISECRETkeybodyTWO")
+        self.run_command(lines=pem, start_row=10, end_row=14)
+        record = self.journal.last_record()
+        self.assertNotIn("SECRETkeybody", "".join(record.output_tail or ()))
+
     def test_ring_caps_records(self):
         for i in range(5):
             self.run_command(cmd=f"cmd{i}")

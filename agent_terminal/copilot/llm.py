@@ -190,10 +190,22 @@ def _system(base, suffix):
     return base + ("\n" + suffix if suffix else "")
 
 
+def _redact_multiline(text) -> str:
+    """Redact a possibly multi-line value, dropping PEM key blocks whole.
+
+    Any free-text field that can carry a newline (a composed follow-up
+    query, an answer command to explain) must use this, not redact_line —
+    the single-line rules never match a bare base64 private-key body.
+    """
+    redacted, _ = redact.redact_lines(str(text or "").split("\n"))
+    return "\n".join(redacted)
+
+
 def intent_messages(query, context, suffix=""):
     # Redact the user's typed goal too, so the remote choke point scrubs
-    # every outgoing field (mirrors explain_messages).
-    query = redact.redact_line(query or "")[0]
+    # every outgoing field (mirrors explain_messages). The composed
+    # follow-up query can be multi-line, so redact as a block.
+    query = _redact_multiline(query)
     user = f"Context:\n{context}\n\nGoal: {query}" if context else query
     return [{"role": "system", "content": _system(_INTENT_SYSTEM, suffix)},
             {"role": "user", "content": user}]
@@ -205,8 +217,9 @@ def summary_messages(context, suffix=""):
 
 
 def explain_messages(command, suffix=""):
+    # An answer command can be a multi-line heredoc carrying a key body.
     return [{"role": "system", "content": _system(_EXPLAIN_SYSTEM, suffix)},
-            {"role": "user", "content": redact.redact_line(command)[0]}]
+            {"role": "user", "content": _redact_multiline(command)}]
 
 
 # -- provider -----------------------------------------------------------

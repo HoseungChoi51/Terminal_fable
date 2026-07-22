@@ -759,6 +759,19 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("copilot_ask.can_take(", SOURCE)
         self.assertIn("def _ask_commit(self, pane, command, run)", SOURCE)
 
+    def test_answer_focus_yields_to_typeahead(self):
+        # Focus moves to the answer card only when the entry is empty, so a
+        # follow-up typed while the model was thinking is never yanked into
+        # the Y/N/T hotkeys.
+        self.assertIn('state["card"] is not None and not entry.get_text()',
+                      SOURCE)
+
+    def test_gated_overlay_does_not_park_or_ungrab(self):
+        # A gated overlay must not park the shell line or drop its modal
+        # grab (keystroke containment).
+        self.assertIn("if eligible and ask_cfg.carry_draft", SOURCE)
+        self.assertIn("if eligible:", SOURCE)
+
 
 class PackagingTests(unittest.TestCase):
     def test_launcher_exists_and_is_executable(self):

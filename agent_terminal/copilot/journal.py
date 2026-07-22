@@ -35,6 +35,11 @@ CAPTURE_TERMPROP = "termprop"
 CAPTURE_SCREEN = "screen"   # reserved for later phases
 CAPTURE_NONE = "none"
 
+# Lines to read above the output tail so a PEM key block whose BEGIN marker
+# sits just above the window is still recognized and dropped whole. Larger
+# than any real private-key block; bounds the read so it stays cheap.
+_PEM_MARGIN_LINES = 120
+
 INTEGRATION_NONE = "cwd-only"
 INTEGRATION_TERMPROPS = "integrated"
 
@@ -166,11 +171,16 @@ class PaneJournal:
         if (self.config.store_output and read_rows is not None
                 and cursor_row is not None and pending.exec_row is not None
                 and cursor_row > pending.exec_row):
+            keep = self.config.output_tail_lines
+            # Read a PEM-sized margin above the tail, redact the block, THEN
+            # slice: otherwise a key block whose BEGIN sits just above the
+            # window is never recognized and its base64 body is kept.
             start = max(pending.exec_row + 1,
-                        cursor_row - self.config.output_tail_lines)
+                        cursor_row - keep - _PEM_MARGIN_LINES)
             lines = read_rows(start, cursor_row)
             if lines:
-                tail, redacted = redact_lines(lines)
+                red, redacted = redact_lines(lines)
+                tail = tuple(red[-keep:]) if keep else ()
         cmd = pending.cmd
         cmd_redacted = False
         if cmd is not None:

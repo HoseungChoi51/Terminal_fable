@@ -127,6 +127,41 @@ class RiskTests(unittest.TestCase):
         self.assertRisk("env FOO=bar ls", crisk.READ_ONLY)
         self.assertRisk("timeout 5 ls -la", crisk.READ_ONLY)
 
+    def test_bare_env_is_read_only(self):
+        self.assertRisk("env", crisk.READ_ONLY)
+
+    def test_find_write_primitives_are_destructive(self):
+        self.assertRisk("find / -name x -fprint /etc/crontab",
+                        crisk.DESTRUCTIVE)
+        self.assertRisk("find . -fprintf out '%p'", crisk.DESTRUCTIVE)
+        self.assertRisk("find / -fls /etc/hosts", crisk.DESTRUCTIVE)
+
+    def test_find_exec_graded_by_inner_command(self):
+        self.assertRisk("find . -name '*.py' -exec grep TODO {} ;",
+                        crisk.READ_ONLY)
+        self.assertRisk("find . -type f -exec rm {} +", crisk.DESTRUCTIVE)
+
+    def test_git_history_and_worktree_discards_are_destructive(self):
+        self.assertRisk("git reflog expire --expire=now --all",
+                        crisk.DESTRUCTIVE)
+        self.assertRisk("git checkout .", crisk.DESTRUCTIVE)
+        self.assertRisk("git checkout -- .", crisk.DESTRUCTIVE)
+        self.assertRisk("git restore --staged --worktree .",
+                        crisk.DESTRUCTIVE)
+        self.assertRisk("git stash clear", crisk.DESTRUCTIVE)
+        self.assertRisk("git worktree remove --force wt", crisk.DESTRUCTIVE)
+        # ordinary git stays put
+        self.assertRisk("git checkout main", crisk.LOCAL_CHANGE)
+        self.assertRisk("git reflog", crisk.READ_ONLY)
+
+    def test_in_place_edit_and_recursive_perms_are_destructive(self):
+        self.assertRisk("sed -i 's/a/b/' /etc/passwd", crisk.DESTRUCTIVE)
+        self.assertRisk("chmod -R 000 /", crisk.DESTRUCTIVE)
+        self.assertRisk("chown -R nobody /etc", crisk.DESTRUCTIVE)
+        # non-recursive / non-in-place stay local-change
+        self.assertRisk("chmod 644 f", crisk.LOCAL_CHANGE)
+        self.assertRisk("sed 's/a/b/' f", crisk.LOCAL_CHANGE)
+
     def test_unknown(self):
         self.assertRisk("frobnicate --wibble", crisk.UNKNOWN)
 
