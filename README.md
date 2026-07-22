@@ -93,6 +93,7 @@ Ctrl+Shift+C/V    copy / paste
 Ctrl+Shift+F      find
 Ctrl+Shift+Space  command menu (copilot)
 Ctrl+?            ask mode — chat at the prompt (copilot)
+Ctrl+Shift+M      expand copilot model chain in the status bar
 Ctrl+Shift+S      session history (copilot)
 Alt+Shift+A       pause/resume copilot (active pane)
 F5                reload viewer

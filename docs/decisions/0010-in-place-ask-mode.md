@@ -24,10 +24,23 @@ user was reaching for.
 
 ## Decision
 
-Replace the side panel with an **in-place ask mode**: a floating popover
-anchored at the prompt cursor (**Ctrl+?**, also Ctrl+Shift+/), driving a
-pure `AskSession` state machine in the GTK-free core
-(`copilot/ask.py`). The GTK layer only renders and wires it.
+Replace the side panel with an **in-place ask mode** (**Ctrl+?**, also
+Ctrl+Shift+/), driving a pure `AskSession` state machine in the GTK-free
+core (`copilot/ask.py`). The GTK layer only renders and wires it.
+
+> **Amendment (surface).** Ask mode first shipped as a floating
+> `Gtk.Popover` anchored at the cursor. A popover is modal — it installs
+> a keyboard/pointer grab — and reconciling that with a surface that must
+> survive an async model turn proved fragile: it either self-dismissed
+> mid-answer, or (popping up with the grab, then disabling autohide) left
+> a **dangling grab that froze the titlebar and ate keystrokes** while
+> showing no clear mode signal. So the surface is now an **in-window
+> slide-in bar** (a `Gtk.Revealer` at the window bottom, above a
+> persistent copilot status bar). An ordinary in-window widget never
+> grabs the window, so the titlebar and terminal stay live by
+> construction; an **⌁ ASK** badge makes the mode obvious, and the status
+> bar always shows the attached model (Ctrl+Shift+M expands the chain).
+> Everything below still holds — only the container changed.
 
 - **Seed carry + park.** On open, the current shell input line is read
   from the prompt tracker, carried into the request as a redacted
@@ -68,16 +81,16 @@ pure `AskSession` state machine in the GTK-free core
   typed follow-up). To refine the last suggestion (multi-turn), click the
   entry and type — the focused entry disarms Y/N/T as ordinary
   characters.
-- **Gated overlay is inert.** With no eligible endpoint (cloud off / none
-  configured) the overlay neither parks the shell line nor drops its
-  modal grab, so a typed question and its Enter cannot leak into the
-  shell behind it.
-- **A conversation surface, not a menu.** The popover pops up (so the
-  autohide grab keeps it in front) and then drops autohide, so it
-  survives the async gap while the model answers instead of
-  self-dismissing on focus churn; Escape / Cancel / Take close it, and
-  the focused entry captures typing so keystrokes never leak into the
-  shell behind it.
+- **Gated bar is inert.** With no eligible endpoint (cloud off / none
+  configured) the bar shows a notice and a disabled entry and never parks
+  the shell line — it can't send anything, so it must not disturb the
+  prompt.
+- **A conversation surface, not a menu.** The bar is an in-window
+  `Gtk.Revealer` — non-modal by construction, so it survives the async
+  gap while the model answers and never grabs the window. Reveal is the
+  mode signal; the focused entry captures typing; Escape / ✕ / Cancel /
+  Take close it via one `close_ask()` teardown that restores the parked
+  draft (unless a command was taken) and returns focus to the terminal.
 
 The side-panel action, its Ctrl+Shift+P accelerator, `IntentPane`, and
 `show_intent_panel` are removed; the LLM logic they held moves into the
@@ -87,8 +100,9 @@ Ctrl+Shift+H + F1).
 ## Consequences
 
 - One place to work: no pane split, and the prompt is both shell and
-  chat. The trade-off is that ask mode is modal (a popover) rather than a
-  persistent pane you can leave open beside your work.
+  chat. The ask bar is non-modal, so you can click back to the terminal
+  while it's open; the trade-off is it's a transient bottom bar rather
+  than a persistent pane you can leave open beside your work.
 - The safety story is small and testable: single-line-only Take,
   auto-pilot capped by risk, one guarded submit helper, and a guardrail
   test — plus a live GTK e2e (real VTE, stubbed LLM) that asserts seed

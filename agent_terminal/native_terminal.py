@@ -1255,8 +1255,8 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-menu", "copilot-ask", "copilot-pause", "copilot-summary",
-    "copilot-debug", "copilot-sessions",
+    "copilot-menu", "copilot-ask", "copilot-model", "copilot-pause",
+    "copilot-summary", "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -1300,6 +1300,7 @@ ACCELERATORS = {
     # the raw Ctrl+Shift+/ so it fires regardless of how the layout names
     # the shifted slash.
     "copilot-ask": ("<Ctrl>question", "<Ctrl><Shift>slash"),
+    "copilot-model": ("<Ctrl><Shift>m",),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1"),
@@ -1519,10 +1520,23 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .intent-card { background-color: alpha(currentColor, 0.06);
                border-radius: 8px; padding: 8px 10px; }
 .intent-explain { color: alpha(currentColor, 0.72); font-size: 0.85em; }
-.copilot-ask > contents { padding: 8px; }
+/* Ask bar: an in-window slide-in surface, not a popover. */
+.copilot-ask { padding: 8px 12px;
+               border-top: 2px solid alpha(#6ab0ff, 0.7);
+               background-color: alpha(#6ab0ff, 0.08); }
+.ask-badge { font-weight: bold; font-size: 0.8em; letter-spacing: 0.06em;
+             padding: 1px 8px; border-radius: 6px; color: #0b1626;
+             background-color: alpha(#6ab0ff, 0.9); }
 .ask-seed { font-family: monospace; font-size: 0.82em;
             color: alpha(currentColor, 0.6); }
 .ask-question { color: alpha(currentColor, 0.85); font-size: 0.9em; }
+/* Persistent copilot status bar along the window bottom. */
+.status-bar { padding: 2px 10px; border-top: 1px solid alpha(currentColor,
+              0.12); background-color: alpha(currentColor, 0.04); }
+.status-bar.ask-active { background-color: alpha(#6ab0ff, 0.16); }
+.status-model { font-size: 0.8em; font-family: monospace;
+                color: alpha(currentColor, 0.7); }
+.status-hint { font-size: 0.78em; color: alpha(currentColor, 0.45); }
 """
 
 SESSION_CHECKPOINT_SECONDS = 60
@@ -3176,6 +3190,12 @@ def build_native_classes(g):
             self._app = app
             self.options = options
             build_info()   # capture the running revision at startup (About box)
+            # Copilot ask-bar + status-bar state (set before _build_body,
+            # which builds the status bar).
+            self._ask_token = None       # identity of the open ask session
+            self._ask_close = None       # teardown closure for the open bar
+            self._status_expanded = False
+            self._copilot_chain_cache = None
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3191,7 +3211,6 @@ def build_native_classes(g):
             dead_keys.connect("key-pressed", self._on_dead_key)
             self.add_controller(dead_keys)
             self._completion_popover = None
-            self._ask_popover = None
             self._summary_dialog = None
             self._resume_prompted = False
             self._session_checkpoint_id = None
@@ -3237,6 +3256,7 @@ def build_native_classes(g):
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
             view.append("Ask Copilot…", "win.copilot-ask")
+            view.append("Copilot Model", "win.copilot-model")
             view.append("Session Summary…", "win.copilot-summary")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
@@ -3266,9 +3286,80 @@ def build_native_classes(g):
             self.notebook = Gtk.Notebook()
             self.notebook.set_scrollable(True)
             self.notebook.connect("switch-page", self._on_switch_page)
+            # Ask mode lives in this in-window revealer (never a modal
+            # popover), above a persistent copilot status bar.
+            self._ask_revealer = Gtk.Revealer()
+            self._ask_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.SLIDE_UP)
+            self._ask_revealer.set_reveal_child(False)
             box.append(self.search_bar)
             box.append(self.notebook)
+            box.append(self._ask_revealer)
+            box.append(self._build_status_bar())
             self.set_child(box)
+
+        def _resolve_copilot_chain(self):
+            """(chain, eligible) for the copilot, resolved once and cached."""
+            cache = getattr(self, "_copilot_chain_cache", None)
+            if cache is None:
+                llm_cfg = self.options.native_config.assistant.llm
+                chain = copilot_llm.resolve_chain(llm_cfg)
+                cache = (chain, copilot_llm.eligible_endpoints(
+                    chain, llm_cfg.allow_remote_context))
+                self._copilot_chain_cache = cache
+            return cache
+
+        def _copilot_status_text(self, expand=False):
+            """Status-bar text: the attached model, abbreviated or full."""
+            assistant = self.options.native_config.assistant
+            if not assistant.enabled or not assistant.ask.enabled:
+                return "copilot: off"
+            chain, eligible = self._resolve_copilot_chain()
+            if not chain:
+                return "copilot: no model"
+            if expand:
+                return "copilot: " + copilot_llm.chain_label(
+                    chain, assistant.llm.allow_remote_context)
+            if not eligible:
+                return "copilot: cloud only (gated)"
+            # Abbreviated: the primary endpoint's first word (e.g. "Loki").
+            return "copilot: " + (eligible[0].label.split() or ["?"])[0]
+
+        def _build_status_bar(self):
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            bar.add_css_class("status-bar")
+            self._status_model = Gtk.Label(
+                label="⌁ " + self._copilot_status_text())
+            self._status_model.set_xalign(0.0)
+            self._status_model.set_hexpand(True)
+            self._status_model.set_ellipsize(Pango.EllipsizeMode.END)
+            self._status_model.set_selectable(True)
+            self._status_model.add_css_class("status-model")
+            self._status_model.set_tooltip_text(
+                "Copilot model — Ctrl+Shift+M for the full chain")
+            hint = Gtk.Label(label="Ctrl+?  ask")
+            hint.add_css_class("status-hint")
+            bar.append(self._status_model)
+            bar.append(hint)
+            self._status_bar = bar
+            return bar
+
+        def _refresh_status(self):
+            """Repaint the status bar (model text + ask-active highlight)."""
+            model = getattr(self, "_status_model", None)
+            if model is None:
+                return
+            model.set_text(
+                "⌁ " + self._copilot_status_text(self._status_expanded))
+            active = getattr(self, "_ask_token", None) is not None
+            setter = (self._status_bar.add_css_class if active
+                      else self._status_bar.remove_css_class)
+            setter("ask-active")
+
+        def toggle_copilot_model(self):
+            """Expand/collapse the status-bar model to the full chain."""
+            self._status_expanded = not self._status_expanded
+            self._refresh_status()
 
         def _install_actions(self):
             for name in ACTION_NAMES + TAB_ACTION_NAMES:
@@ -3793,6 +3884,8 @@ def build_native_classes(g):
                 self.show_completion_menu()
             elif name == "copilot-ask":
                 self.show_ask_overlay()
+            elif name == "copilot-model":
+                self.toggle_copilot_model()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -3844,13 +3937,16 @@ def build_native_classes(g):
                 pass
 
         def show_ask_overlay(self):
-            """In-place ask mode: an LLM chat at the prompt (Ctrl+?).
+            """In-place ask mode: an LLM chat in a slide-in bar (Ctrl+?).
 
-            The half-typed shell line is carried in as redacted context and
-            parked (cleared); the answer can be taken back onto the line
-            with one key. Nothing runs without a keystroke unless auto-pilot
-            has cleared a safe command. All network work goes through the
-            gated, redacting choke point in copilot.llm on a worker thread.
+            The bar is an ordinary in-window widget (a Gtk.Revealer), never
+            a modal popover — so it can never grab the window or trap
+            keystrokes. The half-typed shell line is carried in as redacted
+            context and parked (cleared); the answer can be taken back onto
+            the line with one key. Nothing runs without a keystroke unless
+            auto-pilot has cleared a safe command. All network work goes
+            through the gated, redacting choke point in copilot.llm on a
+            worker thread.
             """
             pane = self._active_pane()
             if pane is None or pane.kind != "terminal":
@@ -3859,21 +3955,17 @@ def build_native_classes(g):
             if not ask_cfg.enabled:
                 return
             llm_cfg = self.options.native_config.assistant.llm
-            chain = copilot_llm.resolve_chain(llm_cfg)
-            eligible = copilot_llm.eligible_endpoints(
-                chain, llm_cfg.allow_remote_context)
+            chain, eligible = self._resolve_copilot_chain()
 
-            # Close any already-open overlay FIRST: its on_closed
-            # synchronously restores its own parked draft onto the shell line
-            # before we read and re-park the line here, so two overlays never
-            # fight over it.
-            if self._ask_popover is not None:
-                self._ask_popover.popdown()
+            # Close any already-open bar FIRST: its close restores its own
+            # parked draft onto the shell line before we read and re-park it,
+            # so two sessions never fight over the line.
+            if self._ask_close is not None:
+                self._ask_close()
 
             # Seed: carry the current shell line as context, then park it —
             # but only when there is an eligible endpoint to send it to. A
-            # gated overlay never sends anything, so it must not disturb the
-            # shell line at all.
+            # gated bar never sends anything, so it must not disturb the line.
             seed = ""
             tracker = getattr(pane, "_tracker", None)
             if eligible and ask_cfg.carry_draft and tracker is not None:
@@ -3884,24 +3976,36 @@ def build_native_classes(g):
             if session.parked:
                 pane.insert_text("\x15")   # Ctrl-U: park (clear) the line
 
-            popover = Gtk.Popover()
-            self._ask_popover = popover
-            popover.add_css_class("copilot-ask")
-            popover.set_parent(pane.terminal)
-            popover.set_position(Gtk.PositionType.BOTTOM)
-            popover.set_pointing_to(self._cursor_rect(pane.terminal))
+            token = object()
+            self._ask_token = token
+            state = {"took": False, "busy": False, "answer": None,
+                     "explain_label": None, "card": None}
 
-            header = Gtk.Label(label=copilot_llm.chain_label(
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            content.add_css_class("copilot-ask")
+            # Header: the ASK badge is the unmistakable mode signal.
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            badge = Gtk.Label(label="⌁ ASK")
+            badge.add_css_class("ask-badge")
+            model_lbl = Gtk.Label(label=copilot_llm.chain_label(
                 chain, llm_cfg.allow_remote_context))
-            header.set_xalign(0.0)
-            header.add_css_class("intent-endpoint")
+            model_lbl.set_xalign(0.0)
+            model_lbl.set_hexpand(True)
+            model_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            model_lbl.add_css_class("intent-endpoint")
+            close_btn = Gtk.Button(label="✕")
+            close_btn.add_css_class("flat")
+            close_btn.set_tooltip_text("Close ask mode (Esc)")
+            header.append(badge)
+            header.append(model_lbl)
+            header.append(close_btn)
             transcript = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                                  spacing=8)
             scroller = Gtk.ScrolledWindow()
             scroller.set_policy(Gtk.PolicyType.NEVER,
                                Gtk.PolicyType.AUTOMATIC)
-            scroller.set_min_content_height(200)
-            scroller.set_min_content_width(460)
+            scroller.set_propagate_natural_height(True)
+            scroller.set_max_content_height(280)
             scroller.set_child(transcript)
             notice = Gtk.Label()
             notice.set_xalign(0.0)
@@ -3915,8 +4019,7 @@ def build_native_classes(g):
                                 spacing=6)
             entry_row.append(entry)
             entry_row.append(spinner)
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            box.append(header)
+            content.append(header)
             if session.parked:
                 # Redact the chip too: a credential mid-typed on the prompt
                 # must not render verbatim (shoulder-surf / screen share).
@@ -3925,14 +4028,10 @@ def build_native_classes(g):
                 chip.set_xalign(0.0)
                 chip.set_wrap(True)
                 chip.add_css_class("ask-seed")
-                box.append(chip)
-            box.append(scroller)
-            box.append(notice)
-            box.append(entry_row)
-            popover.set_child(box)
-
-            state = {"took": False, "busy": False, "answer": None,
-                     "explain_label": None, "card": None}
+                content.append(chip)
+            content.append(scroller)
+            content.append(notice)
+            content.append(entry_row)
 
             if not eligible:
                 entry.set_sensitive(False)
@@ -3946,7 +4045,25 @@ def build_native_classes(g):
                     "(see docs/copilot.md).")
 
             def alive():
-                return self._ask_popover is popover
+                return self._ask_token is token
+
+            def close_ask():
+                # The single teardown path: hide the bar, restore the parked
+                # draft (unless a command was taken), return focus to the
+                # terminal. Idempotent via the token.
+                if self._ask_token is not token:
+                    return
+                self._ask_token = None
+                self._ask_close = None
+                self._ask_revealer.set_reveal_child(False)
+                self._ask_revealer.set_child(None)
+                self._refresh_status()
+                if session.parked and not state["took"]:
+                    pane.insert_text(seed)
+                pane.focus()
+
+            self._ask_close = close_ask
+            close_btn.connect("clicked", lambda *_: close_ask())
 
             def scroll_to_end():
                 adj = scroller.get_vadjustment()
@@ -3982,7 +4099,7 @@ def build_native_classes(g):
                                     "clipboard (not inserted).")
                     return
                 state["took"] = True
-                popover.popdown()
+                close_ask()
                 self._ask_commit(pane, answer.command, run=run_ok)
 
             def explain(answer, label_widget):
@@ -4056,7 +4173,7 @@ def build_native_classes(g):
                 take_btn = Gtk.Button(label="Take (Y)")
                 take_btn.connect("clicked", lambda *_: take(answer))
                 cancel_btn = Gtk.Button(label="Cancel (N)")
-                cancel_btn.connect("clicked", lambda *_: popover.popdown())
+                cancel_btn.connect("clicked", lambda *_: close_ask())
                 explain_btn = Gtk.Button(label="Explain (T)")
                 explain_btn.connect(
                     "clicked", lambda *_: explain(answer, explain_label))
@@ -4145,7 +4262,7 @@ def build_native_classes(g):
             def on_key(controller, keyval, keycode, kstate):
                 name = (Gdk.keyval_name(keyval) or "").lower()
                 if name == "escape":
-                    popover.popdown()
+                    close_ask()
                     return True
                 # Y/N/T are hotkeys only on a shown answer while the entry is
                 # NOT focused; once the user clicks the entry to type a
@@ -4158,7 +4275,7 @@ def build_native_classes(g):
                     take(state["answer"])
                     return True
                 if name == "n":
-                    popover.popdown()
+                    close_ask()
                     return True
                 if name == "t":
                     explain(state["answer"], state["explain_label"])
@@ -4169,35 +4286,18 @@ def build_native_classes(g):
             keys = Gtk.EventControllerKey()
             keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
             keys.connect("key-pressed", on_key)
-            popover.add_controller(keys)
+            content.add_controller(keys)
 
-            def on_closed(p):
-                p.unparent()
-                if self._ask_popover is p:
-                    self._ask_popover = None
-                # Bailing out (Esc / click-away) puts the parked draft back;
-                # taking a command does not.
-                if session.parked and not state["took"]:
-                    pane.insert_text(seed)
-                pane.focus()
-
-            popover.connect("closed", on_closed)
-            popover.popup()
+            # Reveal the bar (this IS the mode signal) and focus the entry.
+            # An in-window widget never grabs the window, so the titlebar and
+            # the terminal stay live; the deferred grab avoids the
+            # unmapped-widget no-op while the revealer animates in.
+            self._ask_revealer.set_child(content)
+            self._ask_revealer.set_reveal_child(True)
+            self._refresh_status()
             if eligible:
-                # A conversation surface, not a menu: after it is up, drop the
-                # autohide grab so it survives the async gap while the model
-                # answers instead of self-dismissing on focus churn. Escape /
-                # Cancel / Take close it; the focused entry captures typing.
-                popover.set_autohide(False)
-                # Defer the grab: grab_focus on an unmapped widget silently
-                # fails, and without the autohide grab the entry must take
-                # focus itself so keystrokes land here, not in the shell.
                 GLib.idle_add(
                     lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
-            # When gated we keep the autohide modal grab: the entry is
-            # disabled and can't take focus, so the grab is what stops the
-            # user's typed question (and its Enter) from leaking into the
-            # shell. Escape / click-away dismisses it.
 
         def _assistant_context(self):
             """cwd + project + recent commands from the recent terminal pane."""

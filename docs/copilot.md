@@ -83,7 +83,10 @@ language model, both **off by default** and gated:
 
 - *Ask mode* — press **Ctrl+?** (or **Ctrl+Shift+/**) to turn the prompt
   itself into a chat with the model, without leaving the command line or
-  splitting a pane. A floating popover opens at the cursor. If you had
+  splitting a pane. A bar slides in at the bottom of the window with an
+  **⌁ ASK** badge (so it's obvious you've switched modes) and the model
+  it's using; it's an ordinary in-window panel, so it never grabs the
+  window or traps your typing — Esc or the ✕ closes it. If you had
   started typing a command, that half-typed line is **carried in as
   context and parked** (cleared from the shell), so you can ask "…how do
   I only keep files from the last day?" and the model answers knowing
@@ -107,6 +110,10 @@ language model, both **off by default** and gated:
   Anything else — git subcommands, `find`, installers, anything the
   classifier can't vouch for — still waits for your Enter. Auto-pilot is
   `assistant.ask.auto_pilot` (off by default).
+
+  A **status bar** along the window bottom always shows the attached
+  model, abbreviated (e.g. `⌁ copilot: Loki`); press **Ctrl+Shift+M** to
+  expand it to the full local-first chain and back.
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.

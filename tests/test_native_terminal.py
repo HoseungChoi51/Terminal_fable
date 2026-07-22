@@ -767,11 +767,23 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn('state["card"] is not None and not entry.has_focus()',
                       SOURCE)
 
-    def test_gated_overlay_does_not_park_or_ungrab(self):
-        # A gated overlay must not park the shell line or drop its modal
-        # grab (keystroke containment).
+    def test_ask_bar_is_non_modal_revealer(self):
+        # Ask mode is an in-window revealer, never a modal popover that could
+        # grab the window or trap keystrokes (the reported bug).
+        self.assertIn("self._ask_revealer.set_reveal_child(True)", SOURCE)
+        self.assertIn("def close_ask()", SOURCE)
+        # parking the shell line still only when an endpoint is eligible
         self.assertIn("if eligible and ask_cfg.carry_draft", SOURCE)
-        self.assertIn("if eligible:", SOURCE)
+        # the ask surface no longer creates a modal popover
+        self.assertNotIn("_ask_popover", SOURCE)
+
+    def test_status_bar_and_model_toggle_wired(self):
+        self.assertIn("copilot-model", nt.ACTION_NAMES)
+        self.assertIn("<Ctrl><Shift>m", nt.ACCELERATORS["copilot-model"])
+        self.assertIn("def _build_status_bar(self)", SOURCE)
+        self.assertIn("def _copilot_status_text(self", SOURCE)
+        self.assertIn("def toggle_copilot_model(self)", SOURCE)
+        self.assertIn('"win.copilot-model"', SOURCE)
 
 
 class BuildInfoTests(unittest.TestCase):
