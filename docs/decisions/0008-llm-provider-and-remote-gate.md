@@ -20,33 +20,43 @@ cloud model now and swap to a small local model later without a rewrite.
 ## Decision
 
 - **One OpenAI-compatible client over stdlib `urllib`**, targeting a
-  **configurable `base_url`**. OpenAI's frontier models now, a local
-  Ollama / llama.cpp / vLLM server later, is a config edit — no code
-  change. The API key is read from a configurable env var and omitted
-  when unset (local servers usually need none). `urllib` is imported
-  only in `copilot/llm.py`, pinned by a source-guardrail test.
-- **A single remote choke point.** Every feature calls
-  `llm.suggest_commands` / `summarize` / `explain`, and each of those,
-  before touching the network, (1) passes through `ContextGate`, which
-  raises unless `assistant.llm.allow_remote_context` is true, and
-  (2) runs all assembled context through the same secret redaction used
-  for on-disk storage. Redaction is unconditional — not a setting.
-- **Off by default.** `allow_remote_context` ships false; the intent
-  panel says how to enable it rather than calling out silently.
+  **configurable `base_url`**, so OpenAI, an office LAN server, and a
+  local Ollama / llama.cpp / vLLM server are all the same code. `urllib`
+  network access is imported only in `copilot/llm.py`, pinned by a
+  source-guardrail test.
+- **A local-first endpoint chain from `auth.json`.** `copilot/auth.py`
+  reads endpoints (base URL, optional key) and classifies each by
+  locality — on-device (loopback), LAN (private ranges / `.local`), or
+  internet — ordering the chain most-private first. The copilot tries
+  each eligible endpoint in turn and falls back to the next only when a
+  closer one is unreachable; the cloud is a last resort.
+- **The opt-in gates the internet tier only.** On-device and LAN
+  endpoints are trusted (data stays on your machine or your local
+  network) and are used without `allow_remote_context`. An internet
+  endpoint is contacted only when the opt-in is on — enforced *before*
+  any network call, including model discovery. If every endpoint is
+  gated and the opt-in is off, the call raises rather than sending.
+- **Redaction is unconditional.** Context is assembled and secret-
+  redacted once, before it is sent to *any* endpoint.
+- **Secrets stay in the header.** An endpoint's key (from `auth.json`,
+  which is gitignored) is placed only in the `Authorization` header —
+  never in the request body, the context, the UI labels, logs, or error
+  messages.
 - Model output is parsed into risk-classified command templates
   (reusing the P2 classifier); the UI can insert a template
-  (`feed_child`, no newline — nothing auto-runs), copy it, or ask for
-  an explanation.
+  (`feed_child`, no newline — nothing auto-runs), copy it, or explain
+  it, and it shows which endpoint answered.
 
 ## Consequences
 
-- With the gate closed, zero bytes leave the machine — a property
-  pinned by tests (the fake opener records no requests). With it open,
-  every payload is redacted first.
-- The same code dogfoods a big model and later serves a small local
-  one; only config changes.
-- Network work runs on worker threads with a timeout and marshals back
-  via the GTK loop, so a slow or unreachable model never blocks the UI;
-  summaries fall back to the heuristic version on error.
+- The copilot works out of the box against a local/LAN model with no
+  opt-in, while the cloud stays off until explicitly enabled — a
+  property pinned by tests (with the opt-in off and only an internet
+  endpoint, the fake server records zero requests).
+- LAN model names are discovered from the server (`GET /v1/models`) and
+  cached, so an endpoint needs only a URL in `auth.json`.
+- Network work runs on worker threads with a per-endpoint timeout and
+  marshals back via the GTK loop, so a slow or unreachable model never
+  blocks the UI; summaries fall back to the heuristic version.
 - Adding another provider means another `complete()` implementation
-  behind the same gate — the choke point and redaction stay put.
+  behind the same chain and redaction — the choke point stays put.

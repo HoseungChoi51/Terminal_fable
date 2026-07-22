@@ -81,10 +81,12 @@ damping, session meaningfulness, exclusions, the heuristic summary, and the
 on-disk session store round-trip, listing, and retention sweep).
 `tests/test_copilot_suggest.py` covers the P2 core (fuzzy scoring, the risk
 classifier against the design-doc examples, recipe metadata and search, and the
-suggestion merge/rank/insert-plan logic). `tests/test_copilot_llm.py` covers the
-P5 LLM core with a fake opener: the remote gate lets nothing through when off,
-every payload is redacted, request/response shaping and parsing, and a guardrail
-that `urllib` stays confined to `copilot/llm.py`. `tests/test_copilot_prompt.py`
+suggestion merge/rank/insert-plan logic). `tests/test_copilot_auth.py` and
+`tests/test_copilot_llm.py` cover the P5 LLM chain with a fake server:
+auth.json parsing and locality tiering, that the internet tier is untouched
+when the opt-in is off (while LAN works without it), local-first fallback and
+model discovery, unconditional redaction, keys staying in the Authorization
+header, and a guardrail that network `urllib` stays confined to `copilot/llm.py`. `tests/test_copilot_prompt.py`
 covers the P4 prompt-line state machine (typing, backspace, control-char/tab/enter
 dirtying, precmd/preexec cycle), and the ghost-completion gate lives in
 `tests/test_copilot_suggest.py`. `tests/test_copilot_context.py` covers the P3

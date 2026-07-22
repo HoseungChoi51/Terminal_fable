@@ -91,55 +91,68 @@ language model, both **off by default** and gated:
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.
 
-The model is reached through a single gated, redacting path (ADR
-[0008](decisions/0008-llm-provider-and-remote-gate.md)): nothing is sent
-unless you turn `assistant.llm.allow_remote_context` on, and everything
-sent is secret-redacted first. The client speaks the OpenAI API against
-a configurable `base_url`, so it works with OpenAI now and a local
-OpenAI-compatible server (Ollama, llama.cpp, vLLM) later by config alone.
+The model is reached through a single redacting choke point (ADR
+[0008](decisions/0008-llm-provider-and-remote-gate.md)): context is
+always secret-redacted before it is sent. Endpoints are **local-first**
+— the copilot tries a model on your machine or your local network before
+ever considering the cloud, and only falls back to the next one when a
+closer one is unreachable. The panel and the summary dialog show the
+whole chain (with the gated cloud marked) and which endpoint answered.
 
-### Enabling the assistant
+### Endpoints and the privacy tiers
 
-Turn the gate on in `~/.config/agent-terminal/native.json` and pick an
-endpoint. The assistant panel and the summary dialog always display
-**which server and model** the copilot is talking to (`model @ host`),
-so you can tell at a glance which of your endpoints is active.
+Each endpoint is classified by where it lives, and the privacy opt-in
+applies only to the internet tier:
 
-**OpenAI cloud** (needs `export OPENAI_API_KEY=…`):
+| Tier | Example host | Opt-in needed? |
+| --- | --- | --- |
+| on-device | `127.0.0.1`, `localhost` | no — data never leaves your machine |
+| LAN | `192.168.x`, `10.x`, `*.local` | no — trusted local network |
+| internet | `api.openai.com` | **yes** — `allow_remote_context` must be on |
 
-```json
-{ "assistant": { "llm": {
-    "allow_remote_context": true,
-    "model": "gpt-4.1"
-} } }
-```
+So local and LAN models work out of the box; the cloud (OpenAI) is used
+only as a last resort, and only after you turn
+`assistant.llm.allow_remote_context` on.
 
-**Local Ollama** (`~/local-llm`, no key; Qwen models default to thinking
-mode — `/no_think` in the system suffix disables it on the
-OpenAI-compatible endpoint):
+### Configuring endpoints (auth.json)
 
-```json
-{ "assistant": { "llm": {
-    "allow_remote_context": true,
-    "base_url": "http://127.0.0.1:11434/v1",
-    "model": "qwen3.5:4b",
-    "system_suffix": "/no_think"
-} } }
-```
-
-**Office server** (no key, office network only):
+Connection info lives in **`auth.json`** — kept out of version control
+(gitignored) because it holds API keys. Put it at
+`~/.config/agent-terminal/auth.json`, or point at it with
+`assistant.llm.auth_path` or the `AGENT_TERMINAL_AUTH_JSON` env var (a
+copy in the repo root is also picked up in development).
 
 ```json
-{ "assistant": { "llm": {
-    "allow_remote_context": true,
-    "base_url": "http://192.168.210.210:8080/v1",
-    "model": "default"
-} } }
+{
+  "custom:local-llm-(192.168.210.210)": [
+    { "label": "Loki (210)", "base_url": "http://192.168.210.210:8080/v1" }
+  ],
+  "GPT": [ { "key": "sk-…your OpenAI key…" } ]
+}
 ```
 
-Config changes apply to newly opened windows. If the endpoint is down or
+- Each entry has a `base_url`; add `"model"` to pin one, otherwise the
+  model name is discovered from the server (`GET /v1/models`).
+- A LAN/on-device entry needs no key. A `GPT`/`OpenAI` entry supplies the
+  cloud key (and defaults `base_url` to OpenAI); its key is sent only in
+  the `Authorization` header, never in the request or logs.
+- Entries are ordered most-private first automatically. Lower
+  `"priority"` wins within a tier.
+
+To turn on the cloud fallback, enable the opt-in in
+`~/.config/agent-terminal/native.json`:
+
+```json
+{ "assistant": { "llm": { "allow_remote_context": true } } }
+```
+
+If no `auth.json` is found, the copilot falls back to a single endpoint
+from the `llm.base_url`/`llm.model`/`llm.api_key_env` config keys.
+Config changes apply to newly opened windows. If every endpoint is
 unreachable, the panel shows the error and summaries fall back to the
-heuristic text (labeled as such).
+heuristic text (labeled as such). For a quirky endpoint (e.g. Ollama's
+Qwen models default to a slow "thinking" mode), `llm.system_suffix`
+(such as `"/no_think"`) is appended to the system prompt.
 
 **Phase P4 — inline ghost text (shipped, default off).** With
 `assistant.suggestions.ghost_text` on, as you type at the prompt the
@@ -255,15 +268,15 @@ missing or invalid values fall back to the defaults shown here:
 - `sessions.exclude_dirs` — directories whose sessions are never saved.
 - `sessions.exclude_commands` — glob patterns whose commands are dropped before saving.
 - `sessions.store_output` — whether saved sessions keep command output.
-- `llm.allow_remote_context` — master gate; nothing goes to the model unless true.
-- `llm.base_url` / `llm.model` / `llm.api_key_env` — endpoint, model, and key variable.
+- `llm.allow_remote_context` — opt-in for the internet tier only; LAN/on-device work without it.
+- `llm.auth_path` — path to auth.json (endpoint chain + keys); default searches the standard locations.
+- `llm.base_url` / `llm.model` / `llm.api_key_env` — single-endpoint fallback when no auth.json.
 - `llm.send_output` — also send redacted command output as context (default off).
 - `llm.system_suffix` — appended to the system prompt (endpoint quirks, e.g. `/no_think`).
-- `llm.timeout_s` — per-request timeout.
+- `llm.timeout_s` — per-request timeout (bounds each endpoint before falling to the next).
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
 (see ADR [0009](decisions/0009-session-persistence-format.md)); every
-stored command is redacted, and nothing leaves your machine. The
-remaining sections (`suggestions`, `recipes`, `llm`, `resume`) are
-parsed and reserved for later phases.
+stored command is redacted. Endpoint keys live only in `auth.json`
+(gitignored) — see *Configuring endpoints* above.

@@ -36,19 +36,24 @@
 
 ## LLM endpoints (P5)
 
-Off by default (`assistant.llm.allow_remote_context: false`). The
-assistant panel and summary dialog always show **`model @ host`** so the
-active endpoint is visible. Three known profiles (full JSON in
-[`docs/copilot.md`](../docs/copilot.md)):
+**Local-first fallback chain**, configured in `auth.json` (gitignored;
+holds keys). Endpoints are tried most-private first; the cloud is a
+last resort. The privacy opt-in (`allow_remote_context`, default off)
+gates only the internet tier — local and LAN work without it. The panel
+and summary show the chain and which endpoint answered.
 
-| Endpoint | base_url | Notes |
+| Tier | Example | Gated? |
 | --- | --- | --- |
-| OpenAI cloud | `https://api.openai.com/v1` (default) | needs `OPENAI_API_KEY` |
-| Office server | `http://192.168.210.210:8080/v1` | no key; office network only |
-| Local Ollama | `http://127.0.0.1:11434/v1` | no key; set `"system_suffix": "/no_think"` (Qwen thinking mode); see `~/local-llm/README.md` |
+| on-device | `127.0.0.1`, `localhost` | no |
+| LAN | `192.168.x`, `10.x`, `*.local` | no |
+| internet | `api.openai.com` | yes — needs `allow_remote_context` |
 
-Dogfooding plan: large cloud model now → smallest workable local model
-later; the swap is config-only (`base_url` + `model`).
+`auth.json` at `~/.config/agent-terminal/auth.json` (or `llm.auth_path`
+/ `AGENT_TERMINAL_AUTH_JSON` / repo root). Current chain (from the
+user's file): `Loki (210) → hulk (205) → GPT (gated)`. LAN model names
+are discovered from the server (`GET /v1/models`); keys are sent only
+in the `Authorization` header. Full JSON format in
+[`docs/copilot.md`](../docs/copilot.md).
 
 ## Safety invariants (hold everywhere, pinned by tests)
 
@@ -58,9 +63,10 @@ later; the swap is config-only (`base_url` + `model`).
    snippet and again in the parser).
 3. **Everything stored is secret-redacted** (keys, tokens, passwords,
    URL credentials, private keys).
-4. **Nothing leaves the machine unless `allow_remote_context` is true**,
-   and every remote payload is redacted again; `urllib` exists only in
-   `copilot/llm.py`.
+4. **Nothing reaches an internet endpoint unless `allow_remote_context`
+   is true** (on-device/LAN are trusted); every payload is redacted
+   first, keys ride only the `Authorization` header, and network
+   `urllib` exists only in `copilot/llm.py`.
 
 ## Module map (`agent_terminal/copilot/`)
 
@@ -78,6 +84,7 @@ never back — ADR 0005). GTK wiring lives in `native_terminal.py`.
 | `fuzzy.py` `risk.py` `recipes.py` `suggest.py` | P2 | Scorer, risk classifier, builtin recipes, merge/rank |
 | `context.py` `typo.py` | P3 | Project/README/argument context, typo correction |
 | `prompt.py` | P4 | Prompt-line state machine for ghost text |
+| `auth.py` | P5 | Parse auth.json into a tiered, ordered endpoint chain |
 | `llm.py` | P5 | OpenAI-compatible client, ContextGate, redacting choke point |
 
 Tests: `tests/test_copilot_{core,sessions,suggest,context,prompt,llm}.py`
