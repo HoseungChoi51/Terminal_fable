@@ -92,7 +92,7 @@ Alt+Shift+Space   pane control mode
 Ctrl+Shift+C/V    copy / paste
 Ctrl+Shift+F      find
 Ctrl+Shift+Space  command menu (copilot)
-Ctrl+Shift+P      assistant panel (copilot)
+Ctrl+?            ask mode — chat at the prompt (copilot)
 Ctrl+Shift+S      session history (copilot)
 Alt+Shift+A       pause/resume copilot (active pane)
 F5                reload viewer

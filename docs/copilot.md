@@ -81,23 +81,39 @@ dogfooding this phase, see the
 **Phase P5 — the LLM assistant (shipped).** Two features that use a
 language model, both **off by default** and gated:
 
-- *Intent side panel* — press **Ctrl+Shift+P** to open a panel, describe
-  a goal in plain language ("split a video into frames"), and get back
-  command templates with `<placeholder>` slots and risk badges. Each can
-  be **inserted** onto your prompt (never run), **copied**, or
-  **explained**. Each tab has at most one panel: pressing Ctrl+Shift+P
-  again jumps to it (close it like any pane, Ctrl+Shift+W).
+- *Ask mode* — press **Ctrl+?** (or **Ctrl+Shift+/**) to turn the prompt
+  itself into a chat with the model, without leaving the command line or
+  splitting a pane. A floating popover opens at the cursor. If you had
+  started typing a command, that half-typed line is **carried in as
+  context and parked** (cleared from the shell), so you can ask "…how do
+  I only keep files from the last day?" and the model answers knowing
+  what you were reaching for. The answer is a ready-to-run command with a
+  risk badge, and you decide what happens to it:
+  - **Y** / **Enter** — *take* it onto the shell line (typed, **not
+    run** — you still press Enter yourself).
+  - **N** / **Esc** — *cancel*; the parked draft is put back.
+  - **T** — *explain* it in place.
+
+  Y/N/T act as one-key actions only while the entry is empty; start
+  typing and they are ordinary characters, so you can ask a **follow-up**
+  ("…exclude node_modules") that refines the previous suggestion. A
+  multi-line answer is never fed to the shell — it is copied instead.
+  Nothing runs on a keystroke unless you turn **auto-pilot** on, and even
+  then only read-only / local-change commands run automatically;
+  anything riskier (or unknown) still waits for your Enter. Auto-pilot is
+  `assistant.ask.auto_pilot` (off by default).
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.
 
 The model is reached through a single redacting choke point (ADR
 [0008](decisions/0008-llm-provider-and-remote-gate.md)): context is
-always secret-redacted before it is sent. Endpoints are **local-first**
-— the copilot tries a model on your machine or your local network before
-ever considering the cloud, and only falls back to the next one when a
-closer one is unreachable. The panel and the summary dialog show the
-whole chain (with the gated cloud marked) and which endpoint answered.
+always secret-redacted before it is sent — including the carried draft
+and your question. Endpoints are **local-first** — the copilot tries a
+model on your machine or your local network before ever considering the
+cloud, and only falls back to the next one when a closer one is
+unreachable. The ask popover and the summary dialog show the whole chain
+(with the gated cloud marked) and which endpoint answered.
 
 ### Endpoints and the privacy tiers
 
@@ -247,6 +263,9 @@ missing or invalid values fall back to the defaults shown here:
             "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY",
             "allow_remote_context": false, "send_output": false,
             "timeout_s": 30},
+    "ask": {"enabled": true, "auto_pilot": false,
+            "auto_pilot_max_risk": "local-change", "carry_draft": true,
+            "max_turns": 8},
     "resume": {"enabled": true, "idle_minutes": 30}
   }
 }
@@ -274,6 +293,11 @@ missing or invalid values fall back to the defaults shown here:
 - `llm.send_output` — also send redacted command output as context (default off).
 - `llm.system_suffix` — appended to the system prompt (endpoint quirks, e.g. `/no_think`).
 - `llm.timeout_s` — per-request timeout (bounds each endpoint before falling to the next).
+- `ask.enabled` — enable ask mode (Ctrl+?); on by default.
+- `ask.auto_pilot` — press Enter for you after Take (default off; nothing runs without a keystroke otherwise).
+- `ask.auto_pilot_max_risk` — highest risk that auto-runs when auto-pilot is on (`read-only`, `local-change`, …); riskier and `unknown` still wait for Enter.
+- `ask.carry_draft` — carry the half-typed shell line into the request as redacted context (default on).
+- `ask.max_turns` — conversation turns kept for follow-up context.
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`

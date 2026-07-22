@@ -112,16 +112,19 @@ agent_terminal/copilot/
     context.py             (P3)  project detection, README extraction, arg-aware rules
     typo.py                (P3)  high-confidence corrections
     prompt.py              (P4)  PromptTracker state machine
-    llm.py                 (P5)  provider interface, OpenAI urllib client, ContextGate
+    llm.py                 (P5)  provider interface, OpenAI urllib client, endpoint chain
+    auth.py                (P5)  auth.json → tiered endpoint chain (on-device/LAN/internet)
+    ask.py                 (P5)  AskSession state machine + can_take/hotkeys (ADR 0010)
     ui.py                  (P1+) GTK factory: session browser, completion menu,
-                                 chips, ghost overlay, IntentPane
+                                 chips, ghost overlay, ask overlay
 tests/
     test_copilot_core.py       (P0)   test_copilot_sessions.py (P1)
     test_copilot_suggest.py    (P2)   test_copilot_context.py  (P3)
     test_copilot_prompt.py     (P4)   test_copilot_llm.py      (P5)
+    test_copilot_auth.py       (P5)   test_copilot_ask.py      (P5)
 docs/
     copilot.md            user-facing doc, grows each phase
-    decisions/0005..0009  see §8
+    decisions/0005..0010  see §8
 ```
 
 ---
@@ -221,7 +224,7 @@ None touch `RESERVED_PLAIN_ACCELERATORS`; conventions kept
 | --- | --- | --- |
 | `copilot-menu` | `Ctrl+Shift+Space` | P2 |
 | `copilot-sessions` | `Ctrl+Shift+S` | P1 |
-| `copilot-panel` | `Ctrl+Shift+P` | P5 |
+| `copilot-ask` | `Ctrl+?` (and `Ctrl+Shift+/`) | P5 (in-place ask, ADR 0010) |
 | `copilot-pause` (active pane) | `Alt+Shift+A` | P2 |
 | `copilot-debug` (journal dump) | menu/socket only | P0 |
 
@@ -355,12 +358,23 @@ accepts; `Escape` dismisses; it vanishes on any doubt.
   resize mid-typing, wrapped lines, reverse-i-search) before any
   default flip (a P6, data-driven decision).
 
-### P5 — LLM: provider, intent side panel, NL templates, resume summaries
+### P5 — LLM: provider, ask surface, NL templates, resume summaries
 
-**Goal.** A new `IntentPane` turns natural language into placeholder
-command templates with explanations and risk labels (insert / copy /
-explain — never auto-run); resume summaries gain LLM polish and the
-idle chip. The full §14 demo passes.
+**Revised (ADR [0010](docs/decisions/0010-in-place-ask-mode.md)).** The
+ask surface shipped first as a split `IntentPane` (Ctrl+Shift+P), then
+was replaced by an **in-place ask mode**: a floating popover at the
+prompt cursor (**Ctrl+?**) driven by a pure `copilot/ask.py`
+`AskSession`. The half-typed line is carried in (redacted) and parked;
+the answer is *taken* onto the shell line with no newline, or auto-run
+only under opt-in auto-pilot capped at `local-change` risk. The
+`IntentPane`/`copilot-panel` surface is removed; the LLM chain and gate
+are unchanged. Everything below describes the original P5; the pure LLM
+core it built is what ask mode now drives.
+
+**Goal.** Turn natural language into placeholder command templates with
+explanations and risk labels (take / copy / explain — auto-run only via
+opt-in auto-pilot); resume summaries gain LLM polish and the idle chip.
+The full §14 demo passes.
 
 - Pure: `Provider` protocol; `OpenAIProvider` over `urllib.request`
   (key from `api_key_env`, model configurable); request builders
@@ -428,3 +442,4 @@ an explicit user keystroke on a visible suggestion).
 | 0007 | Bash shell integration via auto-injected idempotent rcfile + termprops; manual snippet + cwd-only degradation | P0 |
 | 0008 | LLM provider interface with a stdlib-urllib OpenAI backend; local-first, gated + redacting remote choke point | P5 |
 | 0009 | Session persistence format (XDG data dir, dir-per-session JSON + summary.md, retention/exclusion) | P1 |
+| 0010 | In-place ask mode (Ctrl+?) instead of an assistant side panel; single-line-only Take, one guarded submit path | P5 |

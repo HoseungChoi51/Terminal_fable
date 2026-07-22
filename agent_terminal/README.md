@@ -16,7 +16,7 @@
 | P2 command menu | ✅ shipped | Ctrl+Shift+Space fuzzy menu, risk badges, per-pane pause |
 | P3 context heuristics | ✅ shipped | Project/README awareness, argument completion, typo hints (local, no LLM) |
 | P4 ghost text | ✅ shipped (default off) | Inline history completion at the cursor + prompt tracker (local, no LLM) |
-| P5 LLM assistant | ✅ shipped (early, for dogfooding) | Intent panel, session summaries, endpoint indicator |
+| P5 LLM assistant | ✅ shipped (early, for dogfooding) | In-place ask mode, session summaries, local-first endpoint chain |
 | P6 learning/polish | ⬜ planned | Acceptance tracking, personalized ranking |
 
 ## What you can use today
@@ -28,7 +28,7 @@
 | Session history | **Ctrl+Shift+S** | Restore = new tab at last cwd + summary pane; "Insert last command" types, never runs |
 | Command menu | **Ctrl+Shift+Space** | Recipes + history + context (project/README, argument completion, typo fixes), risk badges; Enter inserts **without newline** |
 | "Did you mean" chip | on a not-found command | Suggests the typo fix; click inserts it, never runs it |
-| Assistant panel | **Ctrl+Shift+P** | Natural language → command templates (insert/copy/explain); needs the LLM gate on; one per tab — repeat press jumps to it |
+| Ask mode | **Ctrl+?** (or Ctrl+Shift+/) | Chat at the prompt: the half-typed line is carried in + parked; answer is a command you **take** (Y/Enter, no newline), **cancel** (N/Esc, restores the draft), or **explain** (T). Follow-ups refine. Auto-pilot (off by default) auto-runs only safe commands. Needs the LLM gate/endpoints |
 | Session summary | **View ▸ Session Summary…** | LLM-polished when remote is on, heuristic otherwise; footer names the source |
 | Ghost text | type at prompt | Dim inline completion from your history; **Right**/**Ctrl+Right** accepts, **Esc** dismisses; default off (`suggestions.ghost_text`) |
 | Idle resume chip | automatic | After `resume.idle_minutes` of idleness following real work |
