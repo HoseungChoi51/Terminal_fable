@@ -108,6 +108,25 @@ class RiskTests(unittest.TestCase):
         self.assertRisk("cat urls.txt | grep http | rm -rf -",
                         crisk.DESTRUCTIVE)
 
+    def test_find_delete_and_exec_are_destructive(self):
+        self.assertRisk("find . -delete", crisk.DESTRUCTIVE)
+        self.assertRisk("find / -name '*.log' -delete", crisk.DESTRUCTIVE)
+        self.assertRisk("find . -type f -exec rm {} +", crisk.DESTRUCTIVE)
+        self.assertRisk("find . -name x", crisk.READ_ONLY)  # plain find
+
+    def test_passthrough_wrappers_classify_inner_command(self):
+        # The wrapper must not hide a destructive inner command.
+        self.assertRisk("env rm -rf /tmp/x", crisk.DESTRUCTIVE)
+        self.assertRisk("env FOO=bar rm -rf x", crisk.DESTRUCTIVE)
+        self.assertRisk("xargs rm", crisk.DESTRUCTIVE)
+        self.assertRisk("xargs -0 rm -f", crisk.DESTRUCTIVE)
+        self.assertRisk("timeout 5 rm -rf x", crisk.DESTRUCTIVE)
+        self.assertRisk("nice rm -rf x", crisk.DESTRUCTIVE)
+        self.assertRisk("nohup rm -rf x", crisk.DESTRUCTIVE)
+        # …and keep a benign inner command benign.
+        self.assertRisk("env FOO=bar ls", crisk.READ_ONLY)
+        self.assertRisk("timeout 5 ls -la", crisk.READ_ONLY)
+
     def test_unknown(self):
         self.assertRisk("frobnicate --wibble", crisk.UNKNOWN)
 

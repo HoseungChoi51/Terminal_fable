@@ -89,14 +89,15 @@ language model, both **off by default** and gated:
   I only keep files from the last day?" and the model answers knowing
   what you were reaching for. The answer is a ready-to-run command with a
   risk badge, and you decide what happens to it:
-  - **Y** / **Enter** — *take* it onto the shell line (typed, **not
-    run** — you still press Enter yourself).
+  - **Y** — *take* it onto the shell line (typed, **not run** — you still
+    press Enter yourself).
   - **N** / **Esc** — *cancel*; the parked draft is put back.
   - **T** — *explain* it in place.
 
-  Y/N/T act as one-key actions only while the entry is empty; start
-  typing and they are ordinary characters, so you can ask a **follow-up**
-  ("…exclude node_modules") that refines the previous suggestion. A
+  When an answer appears, focus moves to it, so Y/N/T act on the answer
+  and Enter never accidentally runs anything. To ask a **follow-up**
+  ("…exclude node_modules") that refines the previous suggestion, click
+  the entry (or Tab to it) and type — then Enter sends it. A
   multi-line answer is never fed to the shell — it is copied instead.
   Nothing runs on a keystroke unless you turn **auto-pilot** on, and even
   then only read-only / local-change commands run automatically;

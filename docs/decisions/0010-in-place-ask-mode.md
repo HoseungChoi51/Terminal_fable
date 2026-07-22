@@ -37,16 +37,27 @@ pure `AskSession` state machine in the GTK-free core
 - **Take, don't run.** An answer is *taken* onto the shell line with no
   trailing newline. Auto-run is opt-in (`assistant.ask.auto_pilot`, off
   by default) and even then only for commands at or below a risk ceiling
-  (`local-change`) and never `unknown`. `can_take` also refuses any
-  multi-line command (a newline would run everything up to it) — those
-  are copied instead.
+  (`local-change`), never `unknown`, and never one containing a
+  substitution/redirection the risk classifier cannot see into (`$(…)`,
+  backticks, `<`/`>`) — those are takeable but never auto-run. The
+  classifier itself peels passthrough wrappers (`env`, `xargs`,
+  `timeout`, …) and grades `find … -delete`/`-exec` as destructive, so a
+  wrapper cannot hide a destructive inner command behind a low badge.
+  `can_take` also refuses any multi-line command (a newline would run
+  everything up to it) — those are copied instead.
 - **One guarded submit path.** `_ask_commit` is the single place in the
   app that may feed a submit byte (`\r`), and only under `if run:`. A
   source-guardrail test forbids any other newline/CR feed.
-- **Hotkey disambiguation.** Y/N/T act as one-key take/cancel/explain
-  only while the entry is empty; once you type, they are ordinary
-  characters and Enter sends a follow-up that refines the last
-  suggestion (multi-turn).
+- **No accidental accept.** When an answer arrives, focus moves off the
+  entry onto the answer card, so Y/N/T act on it unambiguously; a stray,
+  held, or auto-repeated **Enter never accepts** (Enter only submits a
+  typed follow-up). To refine the last suggestion (multi-turn), click the
+  entry and type — the focused entry disarms Y/N/T as ordinary
+  characters.
+- **Gated overlay is inert.** With no eligible endpoint (cloud off / none
+  configured) the overlay neither parks the shell line nor drops its
+  modal grab, so a typed question and its Enter cannot leak into the
+  shell behind it.
 - **A conversation surface, not a menu.** The popover pops up (so the
   autohide grab keeps it in front) and then drops autohide, so it
   survives the async gap while the model answers instead of

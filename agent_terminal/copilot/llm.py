@@ -133,13 +133,23 @@ def build_context(*, cwd=None, project=None, recent_commands=(),
     if cwd:
         lines.append(f"cwd: {redact.redact_line(str(cwd))[0]}")
     if draft_command:
-        # The half-typed shell command carried into ask mode.
-        lines.append(f"draft command: {redact.redact_line(str(draft_command))[0]}")
+        # The half-typed shell command carried into ask mode — may be a
+        # multi-line heredoc, so redact as a block (drops PEM key bodies).
+        redacted, _ = redact.redact_lines(str(draft_command).splitlines()
+                                          or [""])
+        if len(redacted) == 1:
+            lines.append(f"draft command: {redacted[0]}")
+        else:
+            lines.append("draft command:")
+            lines.extend("  " + line for line in redacted)
     recent = [c for c in recent_commands if c][-_MAX_RECENT:]
     if recent:
         lines.append("recent commands:")
         for command in recent:
-            lines.append("  " + redact.redact_line(command)[0])
+            # A history entry can itself be multi-line (heredoc); redact the
+            # whole block so a private-key body is never sent line-by-line.
+            redacted, _ = redact.redact_lines(str(command).splitlines())
+            lines.extend("  " + line for line in redacted)
     if send_output and output_tails:
         lines.append("recent output:")
         for tail in output_tails[-3:]:

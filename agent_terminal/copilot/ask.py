@@ -11,9 +11,16 @@ without a display. The GTK overlay drives it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from agent_terminal.copilot import risk as risk_mod
+
+# Shell constructs the risk classifier cannot see into (command
+# substitution, backticks, process substitution, redirection). A command
+# containing any of these may hide destructive work in a place the
+# classifier never inspects, so it is never auto-run — only taken.
+_UNSAFE_AUTORUN = re.compile(r"\$\(|`|[<>]")
 
 # States (the overlay's lifecycle while open).
 INPUT = "input"          # entry focused, composing the question
@@ -81,9 +88,17 @@ class AskSession:
 
 # -- safety predicates ---------------------------------------------------
 
-def hotkeys_armed(state, entry_text) -> bool:
-    """Y/N/T act as one-key actions only on an answer with an empty entry."""
-    return state == ANSWER and not (entry_text or "").strip()
+def hotkeys_armed(state, entry_focused) -> bool:
+    """Y/N/T act as one-key actions only on a shown answer while the text
+    entry does NOT have focus.
+
+    Keying off focus (not entry emptiness) removes the ambiguity where the
+    first character of a typed follow-up would otherwise be swallowed as an
+    accept: after an answer the overlay moves focus off the entry, so Y/N/T
+    are unambiguous; clicking into the entry to type a follow-up disarms
+    them and they become ordinary characters.
+    """
+    return state == ANSWER and not entry_focused
 
 
 def can_take(command, risk_display, *, auto_pilot=False,
@@ -103,4 +118,8 @@ def can_take(command, risk_display, *, auto_pilot=False,
     ceiling_severity = risk_mod.SEVERITY.get(ceiling, risk_mod.SEVERITY[
         risk_mod.LOCAL_CHANGE])
     run_ok = 1 <= severity <= ceiling_severity   # excludes unknown (0)
+    if run_ok and _UNSAFE_AUTORUN.search(command):
+        # Defense in depth: a substitution/redirection can hide destructive
+        # work the classifier graded low. Take it, but never on a keystroke.
+        run_ok = False
     return (True, run_ok)

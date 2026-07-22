@@ -20,7 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from agent_terminal.copilot.config import JournalConfig
-from agent_terminal.copilot.redact import redact_line, redact_lines
+from agent_terminal.copilot.redact import redact_lines
 
 # Termprop names double as event names in apply_batch input.
 PRECMD = "vte.shell.precmd"
@@ -174,7 +174,10 @@ class PaneJournal:
         cmd = pending.cmd
         cmd_redacted = False
         if cmd is not None:
-            cmd, cmd_redacted = redact_line(cmd)
+            # A command can be multi-line (heredoc); redact as a block so a
+            # PEM private-key body is dropped whole, not sent line-by-line.
+            parts, cmd_redacted = redact_lines(cmd.split("\n"))
+            cmd = "\n".join(parts)
         self.records.append(CommandRecord(
             seq=next(self._seq),
             cmd=cmd,

@@ -28,7 +28,7 @@
 | Session history | **Ctrl+Shift+S** | Restore = new tab at last cwd + summary pane; "Insert last command" types, never runs |
 | Command menu | **Ctrl+Shift+Space** | Recipes + history + context (project/README, argument completion, typo fixes), risk badges; Enter inserts **without newline** |
 | "Did you mean" chip | on a not-found command | Suggests the typo fix; click inserts it, never runs it |
-| Ask mode | **Ctrl+?** (or Ctrl+Shift+/) | Chat at the prompt: the half-typed line is carried in + parked; answer is a command you **take** (Y/Enter, no newline), **cancel** (N/Esc, restores the draft), or **explain** (T). Follow-ups refine. Auto-pilot (off by default) auto-runs only safe commands. Needs the LLM gate/endpoints |
+| Ask mode | **Ctrl+?** (or Ctrl+Shift+/) | Chat at the prompt: the half-typed line is carried in + parked; answer is a command you **take** (Y, no newline), **cancel** (N/Esc, restores the draft), or **explain** (T). Click the entry to type a follow-up. Auto-pilot (off by default) auto-runs only safe, no-substitution commands. Needs the LLM gate/endpoints |
 | Session summary | **View ▸ Session Summary…** | LLM-polished when remote is on, heuristic otherwise; footer names the source |
 | Ghost text | type at prompt | Dim inline completion from your history; **Right**/**Ctrl+Right** accepts, **Esc** dismisses; default off (`suggestions.ghost_text`) |
 | Idle resume chip | automatic | After `resume.idle_minutes` of idleness following real work |

@@ -33,6 +33,7 @@ from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import journal as copilot_journal
 from agent_terminal.copilot import llm as copilot_llm
 from agent_terminal.copilot import prompt as copilot_prompt
+from agent_terminal.copilot import redact as copilot_redact
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
 from agent_terminal.copilot import shellintegration as copilot_shell
@@ -3759,10 +3760,20 @@ def build_native_classes(g):
             eligible = copilot_llm.eligible_endpoints(
                 chain, llm_cfg.allow_remote_context)
 
-            # Seed: carry the current shell line as context, then park it.
+            # Close any already-open overlay FIRST: its on_closed
+            # synchronously restores its own parked draft onto the shell line
+            # before we read and re-park the line here, so two overlays never
+            # fight over it.
+            if self._ask_popover is not None:
+                self._ask_popover.popdown()
+
+            # Seed: carry the current shell line as context, then park it —
+            # but only when there is an eligible endpoint to send it to. A
+            # gated overlay never sends anything, so it must not disturb the
+            # shell line at all.
             seed = ""
             tracker = getattr(pane, "_tracker", None)
-            if ask_cfg.carry_draft and tracker is not None:
+            if eligible and ask_cfg.carry_draft and tracker is not None:
                 seed = tracker.typed_prefix() or ""
             session = copilot_ask.AskSession(
                 seed=seed, carry_draft=ask_cfg.carry_draft,
@@ -3770,8 +3781,6 @@ def build_native_classes(g):
             if session.parked:
                 pane.insert_text("\x15")   # Ctrl-U: park (clear) the line
 
-            if self._ask_popover is not None:
-                self._ask_popover.popdown()
             popover = Gtk.Popover()
             self._ask_popover = popover
             popover.add_css_class("copilot-ask")
@@ -3806,8 +3815,10 @@ def build_native_classes(g):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             box.append(header)
             if session.parked:
-                # The seed is shown locally only; it is redacted before send.
-                chip = Gtk.Label(label=f"carrying: {seed}")
+                # Redact the chip too: a credential mid-typed on the prompt
+                # must not render verbatim (shoulder-surf / screen share).
+                chip = Gtk.Label(
+                    label=f"carrying: {copilot_redact.redact_line(seed)[0]}")
                 chip.set_xalign(0.0)
                 chip.set_wrap(True)
                 chip.add_css_class("ask-seed")
@@ -3818,7 +3829,7 @@ def build_native_classes(g):
             popover.set_child(box)
 
             state = {"took": False, "busy": False, "answer": None,
-                     "explain_label": None}
+                     "explain_label": None, "card": None}
 
             if not eligible:
                 entry.set_sensitive(False)
@@ -3894,6 +3905,11 @@ def build_native_classes(g):
             def add_answer_card(answer):
                 card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                 card.add_css_class("intent-card")
+                # Focusable so the answer (not the entry) holds focus after it
+                # arrives: that is what arms the Y/N/T keys unambiguously and
+                # keeps a stray Enter from accepting (a Box has no default
+                # action, so Enter does nothing here).
+                card.set_focusable(True)
                 head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                                spacing=6)
                 cmd = Gtk.Label(label=answer.command)
@@ -3920,8 +3936,8 @@ def build_native_classes(g):
                     auto_pilot=ask_cfg.auto_pilot,
                     ceiling=ask_cfg.auto_pilot_max_risk)
                 via = f"via {answer.endpoint}" if answer.endpoint else ""
-                cue = ("takes and runs it" if run_ok else
-                       "Y / Enter takes it onto the line" if take_ok else
+                cue = ("Y takes and runs it" if run_ok else
+                       "press Y to take it onto the line" if take_ok else
                        "multi-line — copies only")
                 meta = Gtk.Label(label=f"{via} · {cue}".strip(" ·"))
                 meta.set_xalign(0.0)
@@ -3949,6 +3965,7 @@ def build_native_classes(g):
                 transcript.append(card)
                 state["answer"] = answer
                 state["explain_label"] = explain_label
+                state["card"] = card
                 scroll_to_end()
 
             def on_result(result):
@@ -3969,7 +3986,11 @@ def build_native_classes(g):
                 if result.note:
                     notice.set_text(result.note)
                 add_answer_card(session.last_answer())
-                entry.grab_focus()
+                # Move focus to the answer card so Y/N/T act on it (armed
+                # only while the entry is unfocused); the user clicks the
+                # entry to type a follow-up.
+                if state["card"] is not None:
+                    state["card"].grab_focus()
                 return GLib.SOURCE_REMOVE
 
             def on_error(message):
@@ -4007,19 +4028,24 @@ def build_native_classes(g):
                 threading.Thread(target=work, daemon=True).start()
 
             def on_activate(_entry):
+                # Enter only ever submits a follow-up; it never accepts an
+                # answer (so a stray/held/auto-repeat Enter can't run a
+                # command). Accept is Y, or the Take button.
                 text = entry.get_text().strip()
                 if text:
                     submit_question(text)
-                elif copilot_ask.hotkeys_armed(session.state, ""):
-                    take(state["answer"])
 
             def on_key(controller, keyval, keycode, kstate):
                 name = (Gdk.keyval_name(keyval) or "").lower()
                 if name == "escape":
                     popover.popdown()
                     return True
-                if not copilot_ask.hotkeys_armed(
-                        session.state, entry.get_text()):
+                # Y/N/T are hotkeys only on a shown answer while the entry is
+                # NOT focused; once the user clicks the entry to type a
+                # follow-up, they are ordinary characters (the focused entry
+                # also consumes them before this bubble-phase controller).
+                if not copilot_ask.hotkeys_armed(session.state,
+                                                 entry.has_focus()):
                     return False
                 if name == "y":
                     take(state["answer"])
@@ -4034,9 +4060,9 @@ def build_native_classes(g):
 
             entry.connect("activate", on_activate)
             keys = Gtk.EventControllerKey()
-            keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
             keys.connect("key-pressed", on_key)
-            entry.add_controller(keys)
+            popover.add_controller(keys)
 
             def on_closed(p):
                 p.unparent()
@@ -4050,15 +4076,21 @@ def build_native_classes(g):
 
             popover.connect("closed", on_closed)
             popover.popup()
-            # A conversation surface, not a menu: after it is up, drop the
-            # autohide grab so it survives the async gap while the model
-            # answers instead of self-dismissing on focus churn. Escape /
-            # Cancel / Take close it; the focused entry captures typing.
-            popover.set_autohide(False)
-            # Defer the grab: grab_focus on an unmapped widget silently fails,
-            # and without an autohide grab the entry must take focus itself so
-            # keystrokes land here and not in the shell behind it.
-            GLib.idle_add(lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
+            if eligible:
+                # A conversation surface, not a menu: after it is up, drop the
+                # autohide grab so it survives the async gap while the model
+                # answers instead of self-dismissing on focus churn. Escape /
+                # Cancel / Take close it; the focused entry captures typing.
+                popover.set_autohide(False)
+                # Defer the grab: grab_focus on an unmapped widget silently
+                # fails, and without the autohide grab the entry must take
+                # focus itself so keystrokes land here, not in the shell.
+                GLib.idle_add(
+                    lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
+            # When gated we keep the autohide modal grab: the entry is
+            # disabled and can't take focus, so the grab is what stops the
+            # user's typed question (and its Enter) from leaking into the
+            # shell. Escape / click-away dismisses it.
 
         def _assistant_context(self):
             """cwd + project + recent commands from the recent terminal pane."""

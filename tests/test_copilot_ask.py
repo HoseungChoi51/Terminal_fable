@@ -84,17 +84,16 @@ class ComposeQueryTests(unittest.TestCase):
 
 
 class HotkeysArmedTests(unittest.TestCase):
-    def test_armed_on_answer_with_empty_entry(self):
-        self.assertTrue(ask.hotkeys_armed(ask.ANSWER, ""))
-        self.assertTrue(ask.hotkeys_armed(ask.ANSWER, "   "))
-        self.assertTrue(ask.hotkeys_armed(ask.ANSWER, None))
+    def test_armed_on_answer_when_entry_unfocused(self):
+        self.assertTrue(ask.hotkeys_armed(ask.ANSWER, False))
 
-    def test_disarmed_when_typing(self):
-        self.assertFalse(ask.hotkeys_armed(ask.ANSWER, "yes please"))
+    def test_disarmed_when_entry_focused(self):
+        # Typing a follow-up (focus in the entry) must never trigger accept.
+        self.assertFalse(ask.hotkeys_armed(ask.ANSWER, True))
 
     def test_disarmed_off_answer(self):
         for state in (ask.INPUT, ask.THINKING, ask.ERROR, ask.GATED):
-            self.assertFalse(ask.hotkeys_armed(state, ""), state)
+            self.assertFalse(ask.hotkeys_armed(state, False), state)
 
 
 class CanTakeTests(unittest.TestCase):
@@ -131,6 +130,17 @@ class CanTakeTests(unittest.TestCase):
         _, run_ok = ask.can_take("cmd", risk.UNKNOWN, auto_pilot=True,
                                  ceiling=risk.DESTRUCTIVE)
         self.assertFalse(run_ok)
+
+    def test_metacharacters_never_auto_run(self):
+        # A substitution/redirection can hide destructive work the classifier
+        # graded low; such a command is takeable but never auto-run.
+        for cmd in ("echo $(rm -rf ~)", "cat x > /dev/sda",
+                    "echo hi > ~/.bashrc", "diff <(a) <(b)",
+                    "echo `whoami`", "sort f < in.txt"):
+            take_ok, run_ok = ask.can_take(cmd, risk.READ_ONLY,
+                                           auto_pilot=True)
+            self.assertTrue(take_ok, cmd)
+            self.assertFalse(run_ok, cmd)
 
 
 if __name__ == "__main__":

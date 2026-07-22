@@ -34,11 +34,22 @@ _PRIVILEGE_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
 _READ_ONLY = frozenset({
     "ls", "ll", "la", "cat", "less", "more", "head", "tail", "grep",
     "egrep", "rg", "ag", "find", "fd", "du", "df", "ps", "top", "htop",
-    "pwd", "echo", "which", "type", "env", "printenv", "wc", "sort",
+    "pwd", "echo", "which", "type", "printenv", "wc", "sort",
     "uniq", "cut", "tr", "stat", "file", "tree", "date", "whoami", "id",
     "uname", "hostname", "man", "history", "jobs", "free", "uptime",
     "lsblk", "lsusb", "lspci", "dmesg", "who", "w", "tldr", "column",
 })
+# Programs that run another command passed as their arguments. They hide
+# the real command from a first-token classifier, so peel the wrapper (and
+# its own options/args) and classify the inner command instead — as the
+# privilege wrappers are peeled in classify().
+_PASSTHROUGH_WRAPPERS = frozenset({
+    "env", "xargs", "nohup", "timeout", "watch", "nice", "ionice",
+    "stdbuf", "time", "setsid", "chrt",
+})
+# Of those, the ones whose first positional token is their OWN argument
+# (a duration / priority) rather than the start of the inner command.
+_WRAPPER_TAKES_VALUE = frozenset({"timeout", "chrt"})
 _LOCAL_CHANGE = frozenset({
     "mkdir", "touch", "cp", "mv", "ln", "chmod", "chown", "tar", "unzip",
     "zip", "gzip", "gunzip", "make", "cmake", "sed", "tee", "install",
@@ -69,17 +80,47 @@ def _tokenize(segment):
     return [tok for tok in segment.split() if tok]
 
 
+def _peel_wrapper(name, args):
+    """Drop a passthrough wrapper's own options/args; return the inner argv."""
+    i, took_value = 0, False
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-"):
+            i += 1
+        elif name == "env" and "=" in tok:
+            i += 1
+        elif name in _WRAPPER_TAKES_VALUE and not took_value:
+            took_value = True
+            i += 1
+        else:
+            break
+    return args[i:]
+
+
 def _classify_segment(tokens) -> str:
     if not tokens:
         return UNKNOWN
     name = tokens[0].rsplit("/", 1)[-1]
     args = tokens[1:]
 
+    if name in _PASSTHROUGH_WRAPPERS:
+        inner = _peel_wrapper(name, args)
+        if inner:
+            return _classify_segment(inner)
+
     if name in ("rm", "rmdir"):
         return DESTRUCTIVE
     if name == "dd" and any(a.startswith("of=") for a in args):
         return DESTRUCTIVE
     if name in _DESTRUCTIVE_COMMANDS:
+        return DESTRUCTIVE
+    if name == "find" and ("-delete" in args
+                           or any(a.startswith(("-exec", "-ok"))
+                                  for a in args)):
+        # find … -delete / -exec rm … runs destructive work per match.
         return DESTRUCTIVE
     if name in ("kubectl", "helm") and "delete" in args:
         return DESTRUCTIVE

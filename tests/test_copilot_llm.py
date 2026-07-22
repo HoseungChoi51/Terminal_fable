@@ -193,6 +193,29 @@ class RedactionAndSecretTests(unittest.TestCase):
                     if r.full_url.endswith("/chat/completions"))
         self.assertIsNone(chat.get_header("Authorization"))
 
+    def test_multiline_recent_command_drops_pem_block(self):
+        # A heredoc history entry that writes a private key must not ship the
+        # key body — redact_lines drops the PEM block whole.
+        heredoc = ("cat > k.pem <<EOF\n"
+                   "-----BEGIN PRIVATE KEY-----\n"
+                   "MIIEvQIBADANBgkqhkiG9w0BStstSECRETkeymaterial\n"
+                   "-----END PRIVATE KEY-----\nEOF")
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=[heredoc], chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("SECRETkeymaterial", sent)
+
+    def test_multiline_draft_drops_pem_block(self):
+        heredoc = ("cat <<EOF\n-----BEGIN PRIVATE KEY-----\n"
+                   "MIIsecretDRAFTkeymaterial\n-----END PRIVATE KEY-----\nEOF")
+        server = FakeServer()
+        cllm.suggest_commands(_cfg(allow_remote_context=True), query="do it",
+                              draft_command=heredoc, chain=[LAN1],
+                              opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("secretDRAFTkeymaterial", sent)
+
 
 class IntentAndExplainTests(unittest.TestCase):
     def setUp(self):
