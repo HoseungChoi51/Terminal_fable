@@ -315,13 +315,19 @@ def classify(command) -> RiskResult:
 #   fd/rg/ag (--exec/--pre run a command), find (-delete/-exec/-fprint),
 #   dmesg (-C clears), env (-S packs a command), jobs (-x execs), free
 #   (-s N polls forever), date (-s sets the clock), hostname (sets the
-#   name), history (-c/-w), and all pagers / interactive programs.
-# Broaden this only after verifying a program has no such flag.
+#   name), history (-c/-w), lspci/lsblk/lsusb (-O KEY=VALUE / -F redirect
+#   the ID cache to write an arbitrary file, query the network, or hang),
+#   who/w (--lookup does reverse DNS → hang/egress), column (util-linux,
+#   same family that hid lspci's escapes), and all pagers / interactive
+#   programs.
+# Broaden this only after verifying a program has no such flag — that
+# check has been wrong repeatedly (sort, env, lspci all "looked" inert),
+# so the bar is: a program joins only if it is a coreutils/text reader
+# with no config/output-file/exec mechanism of any kind.
 _AUTORUN_ALLOWLIST = frozenset({
     "ls", "cat", "head", "grep", "egrep", "wc", "cut", "tr", "du", "df",
     "ps", "pwd", "echo", "which", "type", "printenv", "stat", "whoami",
-    "id", "uname", "uptime", "lsblk", "lsusb", "lspci", "who", "w",
-    "column",
+    "id", "uname", "uptime",
     "mkdir", "touch",   # the only mutating programs, and neither destroys
 })
 _AUTORUN_METACHARS = re.compile(r"\$\(|`|[<>]")

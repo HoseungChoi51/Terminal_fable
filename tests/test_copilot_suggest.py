@@ -212,7 +212,8 @@ class AutoRunSafeTests(unittest.TestCase):
                     "rg --pre x pat", "fd -x rm", "ag x",
                     "env -Sreboot", "env -S 'rm -rf /'", "jobs -x rm -rf x",
                     "free -s 1", "date -s '2020-01-01'", "hostname evil",
-                    "history -c"):
+                    "history -c", "lspci -O net.cache_name=/home/x/.bashrc",
+                    "lsblk -O", "lsusb -v"):
             self.assertFalse(crisk.auto_run_safe(cmd), cmd)
 
     def test_env_wrapper_still_peels_to_inner(self):
