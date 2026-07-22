@@ -70,22 +70,26 @@ class Completion:
 def resolve_chain(config) -> list[auth.Endpoint]:
     """The ordered endpoint chain from auth.json, else a single config one.
 
-    Internet endpoints inherit the config's default model and, if
-    keyless, the key from ``api_key_env``. LAN endpoints keep model=None
-    so it is discovered from the server at call time.
+    The ``api_key_env`` key is the OpenAI key: it is attached ONLY to the
+    real OpenAI host — never borrowed by a keyless third-party or LAN
+    endpoint (which would leak it cross-host). A keyless OpenAI endpoint
+    also inherits the config's default model; LAN endpoints keep
+    model=None so it is discovered from the server at call time.
     """
     endpoints = auth.load_from_candidates(
         repo_root=_REPO_ROOT) if config.auth_path is None else \
         auth.load_endpoints(config.auth_path)
     if not endpoints:
+        openai = auth.is_openai_host(config.base_url)
         endpoints = [auth.Endpoint(
             label=config.model, base_url=config.base_url,
             tier=auth.classify_host(config.base_url),
-            api_key=os.environ.get(config.api_key_env), model=config.model)]
+            api_key=os.environ.get(config.api_key_env) if openai else None,
+            model=config.model)]
     resolved = []
     for endpoint in endpoints:
         changes = {}
-        if endpoint.tier == auth.INTERNET:
+        if auth.is_openai_host(endpoint.base_url):
             if not endpoint.api_key:
                 changes["api_key"] = os.environ.get(config.api_key_env)
             if not endpoint.model:
@@ -120,13 +124,17 @@ def endpoint_label(endpoint) -> str:
 # -- context assembly (always redacted) ---------------------------------
 
 def build_context(*, cwd=None, project=None, recent_commands=(),
-                  output_tails=None, send_output=False) -> str:
-    """Assemble a compact, fully-redacted context block."""
+                  draft_command=None, output_tails=None,
+                  send_output=False) -> str:
+    """Assemble a compact context block — every field redacted."""
     lines = []
     if project:
-        lines.append(f"project: {project}")
+        lines.append(f"project: {redact.redact_line(str(project))[0]}")
     if cwd:
         lines.append(f"cwd: {redact.redact_line(str(cwd))[0]}")
+    if draft_command:
+        # The half-typed shell command carried into ask mode.
+        lines.append(f"draft command: {redact.redact_line(str(draft_command))[0]}")
     recent = [c for c in recent_commands if c][-_MAX_RECENT:]
     if recent:
         lines.append("recent commands:")
@@ -173,6 +181,9 @@ def _system(base, suffix):
 
 
 def intent_messages(query, context, suffix=""):
+    # Redact the user's typed goal too, so the remote choke point scrubs
+    # every outgoing field (mirrors explain_messages).
+    query = redact.redact_line(query or "")[0]
     user = f"Context:\n{context}\n\nGoal: {query}" if context else query
     return [{"role": "system", "content": _system(_INTENT_SYSTEM, suffix)},
             {"role": "user", "content": user}]
@@ -191,7 +202,13 @@ def explain_messages(command, suffix=""):
 # -- provider -----------------------------------------------------------
 
 class OpenAIProvider:
-    """Minimal OpenAI-compatible chat client for one endpoint."""
+    """Minimal OpenAI-compatible chat client for one endpoint.
+
+    Note: timeout_s is urllib's per-socket-operation deadline, not a
+    wall-clock cap — a server that trickles bytes can outlast it. The
+    call runs on a GTK worker thread, so the UI never blocks, but a hung
+    request holds that endpoint until it errors. Acceptable for now.
+    """
 
     def __init__(self, endpoint, *, model=None, timeout_s=30, opener=None):
         self.endpoint = endpoint
@@ -310,15 +327,21 @@ def _run_chain(config, messages, *, json_mode, chain=None, opener=None):
                 opener=opener).complete(messages, json_mode=json_mode)
             return text, endpoint.label
         except LlmError as exc:
+            # A discovered model that the server later rejects (model
+            # swapped/restarted) must not poison the endpoint forever —
+            # drop the cache so the next attempt re-discovers.
+            if endpoint.model is None:
+                _MODEL_CACHE.pop(endpoint.base_url, None)
             errors.append(f"{endpoint.label}: {exc}")
     raise LlmError("all endpoints failed (" + "; ".join(errors) + ")")
 
 
 def suggest_commands(config, *, query, cwd=None, project=None,
-                     recent_commands=(), chain=None,
+                     recent_commands=(), draft_command=None, chain=None,
                      opener=None) -> IntentResult:
     context = build_context(cwd=cwd, project=project,
-                            recent_commands=recent_commands)
+                            recent_commands=recent_commands,
+                            draft_command=draft_command)
     text, label = _run_chain(
         config, intent_messages(query, context, config.system_suffix),
         json_mode=True, chain=chain, opener=opener)

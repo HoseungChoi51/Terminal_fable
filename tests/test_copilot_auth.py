@@ -41,6 +41,23 @@ class ClassifyTests(unittest.TestCase):
                     "https://example.com/v1"):
             self.assertEqual(auth.classify_host(url), auth.INTERNET, url)
 
+    def test_bare_hostname_is_internet(self):
+        # no IP / .local suffix -> internet (must not borrow the OpenAI key)
+        self.assertEqual(auth.classify_host("http://bigserver:8080/v1"),
+                         auth.INTERNET)
+
+
+class IsOpenAIHostTests(unittest.TestCase):
+    def test_true_only_for_openai(self):
+        self.assertTrue(auth.is_openai_host("https://api.openai.com/v1"))
+        self.assertTrue(auth.is_openai_host("https://api.openai.com/"))
+
+    def test_false_for_others(self):
+        for url in ("https://api.groq.com/openai/v1",
+                    "http://192.168.1.5:8080/v1", "http://bigserver:8080/v1",
+                    "https://openai.example.com/v1", "http://127.0.0.1/v1"):
+            self.assertFalse(auth.is_openai_host(url), url)
+
 
 class ParseTests(unittest.TestCase):
     def test_parses_real_shape(self):

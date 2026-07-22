@@ -216,6 +216,11 @@ class IntentAndExplainTests(unittest.TestCase):
 
 
 class ResolveChainTests(unittest.TestCase):
+    def _write_auth(self, tmp, data):
+        path = Path(tmp) / "auth.json"
+        path.write_text(json.dumps(data))
+        return str(path)
+
     def test_falls_back_to_single_config_endpoint(self):
         # no auth.json at the given path -> one endpoint from config
         cfg = _cfg(base_url="http://127.0.0.1:11434/v1", model="m",
@@ -225,12 +230,137 @@ class ResolveChainTests(unittest.TestCase):
         self.assertEqual(chain[0].tier, auth.ON_DEVICE)
         self.assertEqual(chain[0].model, "m")
 
+    def test_openai_key_scoped_to_openai_host(self):
+        import os
+        import tempfile
+        os.environ["TEST_OAI_KEY"] = "sk-realsecret"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = self._write_auth(tmp, {
+                    "groq": [{"base_url": "https://api.groq.com/openai/v1",
+                              "model": "llama-3"}],
+                    "GPT": [{"base_url": "https://api.openai.com/v1"}],
+                })
+                chain = cllm.resolve_chain(
+                    _cfg(api_key_env="TEST_OAI_KEY", auth_path=path))
+                by = {e.label: e for e in chain}
+                # the OpenAI key goes ONLY to the OpenAI host
+                self.assertEqual(by["GPT"].api_key, "sk-realsecret")
+                self.assertIsNone(by["groq"].api_key)
+        finally:
+            del os.environ["TEST_OAI_KEY"]
+
+    def test_single_endpoint_lan_gets_no_openai_key(self):
+        import os
+        os.environ["TEST_OAI_KEY2"] = "sk-realsecret"
+        try:
+            cfg = _cfg(base_url="http://192.168.1.50:8080/v1", model="m",
+                       api_key_env="TEST_OAI_KEY2",
+                       auth_path="/missing/auth.json")
+            chain = cllm.resolve_chain(cfg)
+            self.assertEqual(chain[0].tier, auth.LAN)
+            self.assertIsNone(chain[0].api_key)   # no borrowed OpenAI key
+        finally:
+            del os.environ["TEST_OAI_KEY2"]
+
+    def test_single_endpoint_openai_gets_key(self):
+        import os
+        os.environ["TEST_OAI_KEY3"] = "sk-realsecret"
+        try:
+            cfg = _cfg(base_url="https://api.openai.com/v1", model="gpt",
+                       api_key_env="TEST_OAI_KEY3",
+                       auth_path="/missing/auth.json")
+            chain = cllm.resolve_chain(cfg)
+            self.assertEqual(chain[0].tier, auth.INTERNET)
+            self.assertEqual(chain[0].api_key, "sk-realsecret")
+        finally:
+            del os.environ["TEST_OAI_KEY3"]
+
     def test_chain_label_marks_gated(self):
         label = cllm.chain_label([LAN1, CLOUD], allow_remote=False)
         self.assertIn("Loki", label)
         self.assertIn("GPT (gated)", label)
         self.assertNotIn("(gated)", cllm.chain_label([LAN1, CLOUD],
                                                      allow_remote=True))
+
+
+class PrivacyFallbackTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_local_down_never_spills_to_gated_cloud(self):
+        # local fails, remote OFF -> raises, and the cloud host is untouched
+        server = FakeServer(fail_hosts={"192.168.210.210"})
+        with self.assertRaises(cllm.LlmError):
+            cllm.summarize(_cfg(allow_remote_context=False),
+                           recent_commands=["ls"], chain=[LAN1, CLOUD],
+                           opener=server)
+        self.assertNotIn("api.openai.com", server.hosts_hit())
+
+    def test_send_output_off_omits_output(self):
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True, send_output=False),
+                       recent_commands=["ls"],
+                       output_tails=[["secret-AKIAIOSFODNN7EXAMPLE"]],
+                       chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
+        self.assertNotIn("recent output", sent)
+
+    def test_send_output_on_redacts_output(self):
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True, send_output=True),
+                       recent_commands=["ls"],
+                       output_tails=[["token AKIAIOSFODNN7EXAMPLE here"]],
+                       chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertIn("recent output", sent)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
+
+    def test_project_and_draft_and_query_redacted(self):
+        server = FakeServer(content='{"commands":[]}')
+        cllm.suggest_commands(
+            _cfg(allow_remote_context=True),
+            query="export AWS=AKIAIOSFODNN7EXAMPLE",
+            project="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            draft_command="curl https://u:pw1234@host",
+            chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
+        self.assertNotIn("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", sent)
+        self.assertNotIn("pw1234", sent)
+
+    def test_discovery_failure_falls_through(self):
+        # LAN1 advertises no models -> discovery fails -> fall to LAN2
+        server = FakeServer(models=())
+
+        class Mixed:
+            def __init__(self):
+                self.reqs = []
+
+            def __call__(self, request, timeout=None):
+                self.reqs.append(request)
+                host = urlsplit(request.full_url).hostname
+                if request.full_url.endswith("/models"):
+                    models = [] if host == "192.168.210.210" else ["m2"]
+                    return FakeResponse(json.dumps(
+                        {"data": [{"id": m} for m in models]}).encode())
+                return FakeResponse(json.dumps(
+                    {"choices": [{"message": {"content": "ok"}}]}).encode())
+
+        opener = Mixed()
+        out = cllm.summarize(_cfg(allow_remote_context=True),
+                             recent_commands=["ls"], chain=[LAN1, LAN2],
+                             opener=opener)
+        self.assertEqual(out.endpoint, "hulk")
+
+    def test_discovery_failure_not_cached(self):
+        server = FakeServer(models=())
+        with self.assertRaises(cllm.LlmError):
+            cllm.summarize(_cfg(allow_remote_context=True),
+                           recent_commands=["ls"], chain=[LAN1],
+                           opener=server)
+        self.assertNotIn(LAN1.base_url, cllm._MODEL_CACHE)
 
 
 class SourceGuardrailTests(unittest.TestCase):

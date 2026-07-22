@@ -50,6 +50,18 @@ class Endpoint:
         return replace(self, **changes)
 
 
+_OPENAI_HOSTS = frozenset({"api.openai.com"})
+
+
+def is_openai_host(base_url) -> bool:
+    """True only for the real OpenAI API host.
+
+    The OpenAI key (from api_key_env) must never be attached to any other
+    endpoint — a keyless third-party or LAN host must not borrow it.
+    """
+    return (urlsplit(base_url).hostname or "").lower() in _OPENAI_HOSTS
+
+
 def classify_host(base_url) -> str:
     """Tier for a base URL: on-device (loopback), LAN, or internet."""
     host = (urlsplit(base_url).hostname or "").lower()
