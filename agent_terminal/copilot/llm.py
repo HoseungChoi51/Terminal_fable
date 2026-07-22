@@ -123,15 +123,27 @@ def endpoint_label(endpoint) -> str:
 
 # -- context assembly (always redacted) ---------------------------------
 
+def _redact_multiline(text) -> str:
+    """Redact a possibly multi-line value, dropping PEM key blocks whole.
+
+    Any user-derived free-text field must use this, never redact_line: the
+    single-line rules never match a bare base64 private-key body, so a
+    multi-line value (heredoc command, composed follow-up query) would
+    otherwise ship the key body intact.
+    """
+    redacted, _ = redact.redact_lines(str(text or "").split("\n"))
+    return "\n".join(redacted)
+
+
 def build_context(*, cwd=None, project=None, recent_commands=(),
                   draft_command=None, output_tails=None,
                   send_output=False) -> str:
     """Assemble a compact context block — every field redacted."""
     lines = []
     if project:
-        lines.append(f"project: {redact.redact_line(str(project))[0]}")
+        lines.append(f"project: {_redact_multiline(project)}")
     if cwd:
-        lines.append(f"cwd: {redact.redact_line(str(cwd))[0]}")
+        lines.append(f"cwd: {_redact_multiline(cwd)}")
     if draft_command:
         # The half-typed shell command carried into ask mode — may be a
         # multi-line heredoc, so redact as a block (drops PEM key bodies).
@@ -188,17 +200,6 @@ _EXPLAIN_SYSTEM = (
 
 def _system(base, suffix):
     return base + ("\n" + suffix if suffix else "")
-
-
-def _redact_multiline(text) -> str:
-    """Redact a possibly multi-line value, dropping PEM key blocks whole.
-
-    Any free-text field that can carry a newline (a composed follow-up
-    query, an answer command to explain) must use this, not redact_line —
-    the single-line rules never match a bare base64 private-key body.
-    """
-    redacted, _ = redact.redact_lines(str(text or "").split("\n"))
-    return "\n".join(redacted)
 
 
 def intent_messages(query, context, suffix=""):
