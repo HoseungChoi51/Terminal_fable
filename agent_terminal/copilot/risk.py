@@ -318,7 +318,7 @@ def classify(command) -> RiskResult:
 _AUTORUN_ALLOWLIST = frozenset({
     "ls", "cat", "head", "grep", "egrep", "wc", "cut", "tr", "du", "df",
     "ps", "pwd", "echo", "which", "type", "printenv", "env", "stat",
-    "date", "whoami", "id", "uname", "hostname", "history", "jobs", "free",
+    "date", "whoami", "id", "uname", "hostname", "jobs", "free",
     "uptime", "lsblk", "lsusb", "lspci", "who", "w", "column",
     "mkdir", "touch",   # the only mutating programs, and neither destroys
 })
