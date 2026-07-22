@@ -65,6 +65,19 @@ class LlmConfig:
 
 
 @dataclass(frozen=True)
+class AskConfig:
+    """In-place "ask mode" (Ctrl+? overlay)."""
+    enabled: bool = True
+    # Auto-pilot presses Enter for you; off by default (nothing runs
+    # without a keystroke). When on, only commands at or below
+    # auto_pilot_max_risk auto-run — riskier ones still wait for Enter.
+    auto_pilot: bool = False
+    auto_pilot_max_risk: str = "local-change"
+    carry_draft: bool = True        # seed the half-typed command as context
+    max_turns: int = 8              # conversation turns kept for context
+
+
+@dataclass(frozen=True)
 class ResumeConfig:
     enabled: bool = True
     idle_minutes: int = 30
@@ -80,6 +93,7 @@ class AssistantConfig:
     suggestions: SuggestionsConfig = field(default_factory=SuggestionsConfig)
     recipes: RecipesConfig = field(default_factory=RecipesConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    ask: AskConfig = field(default_factory=AskConfig)
     resume: ResumeConfig = field(default_factory=ResumeConfig)
 
 
@@ -124,6 +138,7 @@ _SECTIONS = {
     "suggestions": SuggestionsConfig,
     "recipes": RecipesConfig,
     "llm": LlmConfig,
+    "ask": AskConfig,
     "resume": ResumeConfig,
 }
 
