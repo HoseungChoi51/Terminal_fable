@@ -2037,11 +2037,19 @@ def build_native_classes(g):
             """Type text into the child without running it (no newline)."""
             if not text:
                 return
+            data = text.encode("utf-8")
             try:
-                self.terminal.feed_child(text.encode("utf-8"))
+                self.terminal.feed_child(data)
             except TypeError:
-                data = text.encode("utf-8")
-                self.terminal.feed_child(data, len(data))
+                try:
+                    self.terminal.feed_child(data, len(data))
+                except Exception:
+                    pass
+            except Exception:
+                # The pane may have been disposed (e.g. its tab/pane closed
+                # while an ask bar over it was still open); a best-effort
+                # feed must never crash the app.
+                pass
 
         # -- "did you mean" correction chip (copilot P3) -----------------
 
@@ -3526,6 +3534,11 @@ def build_native_classes(g):
                 self.close()
 
         def _on_switch_page(self, notebook, page_widget, page_index):
+            # The ask bar is a window-level widget bound to the pane it
+            # opened over; dismiss it on a tab switch so take/close can't
+            # act on a pane in another (or a closed) tab.
+            if self._ask_close is not None:
+                self._ask_close()
             for tab in self.tabs:
                 if tab.widget is page_widget:
                     self.set_title(self.options.title or tab.title
@@ -4059,8 +4072,11 @@ def build_native_classes(g):
                 self._ask_revealer.set_child(None)
                 self._refresh_status()
                 if session.parked and not state["took"]:
-                    pane.insert_text(seed)
-                pane.focus()
+                    pane.insert_text(seed)   # crash-safe (guarded)
+                try:
+                    pane.focus()
+                except Exception:
+                    pass
 
             self._ask_close = close_ask
             close_btn.connect("clicked", lambda *_: close_ask())

@@ -776,6 +776,11 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("if eligible and ask_cfg.carry_draft", SOURCE)
         # the ask surface no longer creates a modal popover
         self.assertNotIn("_ask_popover", SOURCE)
+        # a tab switch dismisses the window-level bar (no stale-pane ops)
+        self.assertIn("def _on_switch_page(self, notebook, page_widget",
+                      SOURCE)
+        switch = SOURCE.split("def _on_switch_page(", 1)[1][:500]
+        self.assertIn("self._ask_close()", switch)
 
     def test_status_bar_and_model_toggle_wired(self):
         self.assertIn("copilot-model", nt.ACTION_NAMES)
