@@ -44,14 +44,21 @@ pure `AskSession` state machine in the GTK-free core
   have gaps, so it is not trusted alone for unattended execution: a
   command auto-runs only when every pipeline segment leads with a program
   on a small curated safe list and it contains no substitution or
-  redirection. The list admits a program only if it is safe under
-  *every* flag — it can never write a file, exec another program, or
-  block — which is what lets the gate ignore arguments (flags are
-  per-program and overloaded, so a flag denylist can't work). That
-  excludes dual-use readers like `sort` (`-o`/`--compress-program`),
-  `uniq` (positional output), `tree`/`file`, `tail -f`, `fd`/`rg`, and
-  `find`, alongside pagers and interactive programs. A classifier miss
-  then costs at most a wrong badge, never an auto-run.
+  redirection. The list admits a program only if, under *every* flag, it
+  can never write a file, exec another program, mutate system state, or
+  block on ordinary input — which is what lets the gate ignore arguments
+  (flags are per-program and overloaded, so a flag denylist can't work).
+  Successive adversarial rounds pared it to the coreutils/procps inert
+  readers plus `mkdir`/`touch`, excluding every dual-use tool found:
+  `sort` (`-o`/`--compress-program` → writes/execs), `uniq` (positional
+  output), `tree`/`file`, `tail -f`/`free -s` (block), `fd`/`rg` (exec),
+  `env -S`/`jobs -x`, `date`/`hostname` (mutate state),
+  `lspci`/`lsblk`/`lsusb` (`-O` writes a file / hits the network),
+  `who`/`w` (DNS), `find`, and pagers/interactive programs. (Accepted
+  residual: a content reader like `cat`/`grep` can still be *hung* on a
+  crafted infinite source such as `/dev/zero` — a recoverable Ctrl-C, not
+  data loss or exec, and not something a real suggestion carries.) A
+  classifier miss then costs at most a wrong badge, never an auto-run.
 - **One guarded submit path.** `_ask_commit` is the single place in the
   app that may feed a submit byte (`\r`), and only under `if run:`. A
   source-guardrail test forbids any other newline/CR feed.

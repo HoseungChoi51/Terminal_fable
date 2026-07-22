@@ -302,14 +302,14 @@ def classify(command) -> RiskResult:
 # list. A classifier miss then costs at most a wrong badge, never an
 # auto-run.
 #
-# Membership criterion is strict: a program qualifies only if it is safe
-# under *every* flag and argument — it can never write to a file, exec
-# another program, block indefinitely, or mutate system state, no matter
-# how it is invoked. That is what lets the gate ignore arguments (which are
-# per-program and overloaded — `-o` is an output file to `sort` but an
-# output *format* to `ps`, so a flag denylist cannot work). So the set is
-# the canonical inert readers plus mkdir/touch; anything with even an
-# obscure dual-use flag is excluded, even though it reads by default:
+# Membership criterion is strict: a program qualifies only if, under
+# *every* flag and argument, it can never write to a file, exec another
+# program, mutate system state, or block on *ordinary* input. That is what
+# lets the gate ignore arguments (which are per-program and overloaded —
+# `-o` is an output file to `sort` but an output *format* to `ps`, so a
+# flag denylist cannot work). So the set is the canonical inert readers
+# plus mkdir/touch; anything with even an obscure dual-use flag is
+# excluded, even though it reads by default:
 #   sort (-o, --compress-program=CMD → writes/execs), uniq (positional
 #   O_TRUNC output), tree (-o), file (-C writes), tail (-f blocks),
 #   fd/rg/ag (--exec/--pre run a command), find (-delete/-exec/-fprint),
@@ -324,6 +324,16 @@ def classify(command) -> RiskResult:
 # check has been wrong repeatedly (sort, env, lspci all "looked" inert),
 # so the bar is: a program joins only if it is a coreutils/text reader
 # with no config/output-file/exec mechanism of any kind.
+#
+# Accepted residual: a content reader here (cat, grep, wc, head, cut, du
+# --files0-from) can be made to *hang* on a deliberately-crafted infinite
+# source — `cat /dev/zero`, a FIFO, `du --files0-from=-`. Unlike the
+# excluded `tail -f`/`free -s` (which block on their *ordinary* input),
+# that is a recoverable Ctrl-C hang on a pathological argument no real
+# suggestion would carry — never data loss or code execution — so it is
+# not a disqualifier. There is no static way to bar every blocking input
+# (a FIFO is indistinguishable from a regular file by name), and dropping
+# cat/grep would gut the feature for a non-issue.
 _AUTORUN_ALLOWLIST = frozenset({
     "ls", "cat", "head", "grep", "egrep", "wc", "cut", "tr", "du", "df",
     "ps", "pwd", "echo", "which", "type", "printenv", "stat", "whoami",
