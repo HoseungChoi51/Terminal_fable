@@ -303,23 +303,25 @@ def classify(command) -> RiskResult:
 # auto-run.
 #
 # Membership criterion is strict: a program qualifies only if it is safe
-# under *every* flag — it can never write to a file, exec another program,
-# or block indefinitely, no matter how it is invoked. That is what lets the
-# gate ignore arguments (which are per-program and overloaded — `-o` is an
-# output file to `sort` but an output *format* to `ps`, so a flag denylist
-# cannot work). Anything dual-use is therefore excluded, even though it
-# reads by default:
-#   sort (-o, --compress-program=CMD → writes / execs), uniq (2nd
-#   positional is an O_TRUNC output file), tree (-o FILE), file (-C writes
-#   a compiled magic file), tail (-f blocks), fd/rg/ag (--exec/--pre run a
-#   command), find (-delete/-exec/-fprint), dmesg (-C clears the log), and
-#   all pagers / interactive programs (less, more, man, top, htop).
+# under *every* flag and argument — it can never write to a file, exec
+# another program, block indefinitely, or mutate system state, no matter
+# how it is invoked. That is what lets the gate ignore arguments (which are
+# per-program and overloaded — `-o` is an output file to `sort` but an
+# output *format* to `ps`, so a flag denylist cannot work). So the set is
+# the canonical inert readers plus mkdir/touch; anything with even an
+# obscure dual-use flag is excluded, even though it reads by default:
+#   sort (-o, --compress-program=CMD → writes/execs), uniq (positional
+#   O_TRUNC output), tree (-o), file (-C writes), tail (-f blocks),
+#   fd/rg/ag (--exec/--pre run a command), find (-delete/-exec/-fprint),
+#   dmesg (-C clears), env (-S packs a command), jobs (-x execs), free
+#   (-s N polls forever), date (-s sets the clock), hostname (sets the
+#   name), history (-c/-w), and all pagers / interactive programs.
 # Broaden this only after verifying a program has no such flag.
 _AUTORUN_ALLOWLIST = frozenset({
     "ls", "cat", "head", "grep", "egrep", "wc", "cut", "tr", "du", "df",
-    "ps", "pwd", "echo", "which", "type", "printenv", "env", "stat",
-    "date", "whoami", "id", "uname", "hostname", "jobs", "free",
-    "uptime", "lsblk", "lsusb", "lspci", "who", "w", "column",
+    "ps", "pwd", "echo", "which", "type", "printenv", "stat", "whoami",
+    "id", "uname", "uptime", "lsblk", "lsusb", "lspci", "who", "w",
+    "column",
     "mkdir", "touch",   # the only mutating programs, and neither destroys
 })
 _AUTORUN_METACHARS = re.compile(r"\$\(|`|[<>]")

@@ -205,12 +205,21 @@ class AutoRunSafeTests(unittest.TestCase):
             self.assertFalse(crisk.auto_run_safe(cmd), cmd)
 
     def test_dual_use_readonly_tools_excluded(self):
-        # These read by default but can write a file / exec / hang under a
-        # flag, so they are NOT auto-run-safe (the round-4 bypasses).
+        # These read by default but can write a file / exec / hang / mutate
+        # system state under a flag, so they are NOT auto-run-safe.
         for cmd in ("sort -o f g", "sort --compress-program=x f",
                     "uniq a b", "tree -o out .", "tail -f log", "file -C",
-                    "rg --pre x pat", "fd -x rm", "ag x"):
+                    "rg --pre x pat", "fd -x rm", "ag x",
+                    "env -Sreboot", "env -S 'rm -rf /'", "jobs -x rm -rf x",
+                    "free -s 1", "date -s '2020-01-01'", "hostname evil",
+                    "history -c"):
             self.assertFalse(crisk.auto_run_safe(cmd), cmd)
+
+    def test_env_wrapper_still_peels_to_inner(self):
+        # env is not itself auto-runnable, but as a wrapper it still peels
+        # to a safe inner command.
+        self.assertTrue(crisk.auto_run_safe("env FOO=1 ls"))
+        self.assertFalse(crisk.auto_run_safe("env FOO=1 rm -rf x"))
 
     def test_metacharacters_block(self):
         for cmd in ("ls > f", "cat < f", "echo $(x)", "ls `pwd`",
