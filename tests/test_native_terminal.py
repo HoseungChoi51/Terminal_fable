@@ -774,6 +774,32 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("if eligible:", SOURCE)
 
 
+class BuildInfoTests(unittest.TestCase):
+    def test_reads_current_repo_revision(self):
+        info = nt.resolve_build_info(REPO_ROOT)
+        self.assertNotEqual(info.branch, "unknown")
+        self.assertRegex(info.commit, r"^[0-9a-f]{7,}$")
+
+    def test_non_git_dir_falls_back_to_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = nt.resolve_build_info(tmp)
+            self.assertEqual(info.branch, "unknown")
+            self.assertEqual(info.commit, "unknown")
+            self.assertFalse(info.dirty)
+
+    def test_describe(self):
+        self.assertEqual(nt.BuildInfo("main", "abc1234").describe(),
+                         "main @ abc1234")
+        self.assertIn("+dirty",
+                      nt.BuildInfo("x", "y", dirty=True).describe())
+        self.assertIn("unknown", nt.BuildInfo().describe())
+
+    def test_about_action_wired(self):
+        self.assertIn("about", nt.ACTION_NAMES)
+        self.assertIn('"win.about"', SOURCE)
+        self.assertIn("def show_about(self)", SOURCE)
+
+
 class PackagingTests(unittest.TestCase):
     def test_launcher_exists_and_is_executable(self):
         launcher = REPO_ROOT / "bin" / "agent-terminal-native"

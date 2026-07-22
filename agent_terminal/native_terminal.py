@@ -49,6 +49,59 @@ APP_TITLE = "Agent Terminal"
 CONTROL_SOCKET_ENV = "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET"
 CONFIG_PATH = "~/.config/agent-terminal/native.json"
 
+
+@dataclass(frozen=True)
+class BuildInfo:
+    """Which source revision this process is running (for the About box)."""
+    branch: str = "unknown"
+    commit: str = "unknown"
+    dirty: bool = False
+
+    def describe(self) -> str:
+        if self.branch == "unknown" and self.commit == "unknown":
+            return "unknown (not a git checkout)"
+        dirty = " +dirty" if self.dirty else ""
+        return f"{self.branch} @ {self.commit}{dirty}"
+
+
+def resolve_build_info(repo_root=None) -> BuildInfo:
+    """Git branch/commit of the source tree this module was loaded from.
+
+    Best-effort and never raises: outside a git checkout every field falls
+    back to its default, so the About box still opens.
+    """
+    root = repo_root or Path(__file__).resolve().parent.parent
+
+    def git(*args):
+        try:
+            result = subprocess.run(["git", "-C", str(root), *args],
+                                    capture_output=True, text=True,
+                                    timeout=1.5)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    commit = git("rev-parse", "--short", "HEAD")
+    return BuildInfo(branch=branch or "unknown", commit=commit or "unknown",
+                     dirty=bool(git("status", "--porcelain")))
+
+
+_build_info_cache: "BuildInfo | None" = None
+
+
+def build_info() -> BuildInfo:
+    """Resolve build info once, captured at process start (the running code).
+
+    Cached so a later `git checkout` in a pane can't change what the About
+    box reports — it reflects the revision actually loaded, not the current
+    working-tree HEAD.
+    """
+    global _build_info_cache
+    if _build_info_cache is None:
+        _build_info_cache = resolve_build_info()
+    return _build_info_cache
+
 DEPENDENCY_PACKAGES = (
     "python3-gi",
     "gir1.2-gtk-4.0",
@@ -1204,7 +1257,7 @@ ACTION_NAMES = (
     "zoom-in", "zoom-out", "zoom-reset",
     "copilot-menu", "copilot-ask", "copilot-pause", "copilot-summary",
     "copilot-debug", "copilot-sessions",
-    "shortcuts", "preferences", "quit",
+    "shortcuts", "preferences", "about", "quit",
 )
 
 TAB_ACTION_NAMES = tuple(f"tab-{n}" for n in range(1, 10))
@@ -3122,6 +3175,7 @@ def build_native_classes(g):
             self.set_default_size(1100, 700)
             self._app = app
             self.options = options
+            build_info()   # capture the running revision at startup (About box)
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3190,6 +3244,7 @@ def build_native_classes(g):
             meta = Gio.Menu()
             meta.append("Keyboard Shortcuts", "win.shortcuts")
             meta.append("Preferences", "win.preferences")
+            meta.append("About", "win.about")
             meta.append("Quit", "app.quit")
             menu.append_section(None, meta)
             button = Gtk.MenuButton()
@@ -3588,6 +3643,52 @@ def build_native_classes(g):
             self._close_on_escape(dialog)
             dialog.present()
 
+        def show_about(self):
+            info = build_info()
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title(f"About {APP_TITLE}")
+            dialog.set_default_size(420, 200)
+            title = Gtk.Label()
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            title.set_markup(
+                f"<b>{html.escape(APP_TITLE)}</b>  {html.escape(VERSION)}")
+            # The branch/commit the running executable was built from — the
+            # answer to "which version am I dogfooding".
+            grid = Gtk.Grid()
+            grid.set_row_spacing(4)
+            grid.set_column_spacing(16)
+            rows = [("branch", info.branch),
+                    ("commit", info.commit + (" (modified)" if info.dirty
+                                              else "")),
+                    ("source", str(Path(__file__).resolve().parent.parent))]
+            for row, (name, value) in enumerate(rows):
+                key = Gtk.Label(label=name)
+                key.set_xalign(0.0)
+                key.add_css_class("intent-endpoint")
+                val = Gtk.Label(label=value)
+                val.set_xalign(0.0)
+                val.set_selectable(True)
+                val.set_wrap(True)
+                grid.attach(key, 0, row, 1, 1)
+                grid.attach(val, 1, row, 1, 1)
+            close_button = Gtk.Button(label="Close")
+            close_button.connect("clicked", lambda *_: dialog.close())
+            close_button.set_halign(Gtk.Align.END)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_top(16)
+            box.set_margin_bottom(16)
+            box.set_margin_start(16)
+            box.set_margin_end(16)
+            box.append(title)
+            box.append(grid)
+            box.append(close_button)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
         def show_pane_leader(self):
             if self._leader is not None:
                 return
@@ -3704,6 +3805,8 @@ def build_native_classes(g):
                 self.show_shortcuts()
             elif name == "preferences":
                 self.show_preferences()
+            elif name == "about":
+                self.show_about()
 
         def show_copilot_journal(self):
             """Dump the active pane's command journal into a viewer pane."""
