@@ -193,6 +193,29 @@ class RedactionAndSecretTests(unittest.TestCase):
                     if r.full_url.endswith("/chat/completions"))
         self.assertIsNone(chat.get_header("Authorization"))
 
+    def test_user_agent_is_not_python_urllib(self):
+        # urllib's default UA ("Python-urllib/x.y") is 403'd by WAFs in front
+        # of some gateways (centinel); we must send our own.
+        server = FakeServer()
+        cllm.summarize(_cfg(allow_remote_context=True),
+                       recent_commands=["ls"], chain=[LAN1], opener=server)
+        ua = server.requests[0].get_header("User-agent")
+        self.assertTrue(ua)
+        self.assertNotIn("urllib", ua.lower())
+
+
+class ListModelsTests(unittest.TestCase):
+    def test_lists_all_advertised_models(self):
+        server = FakeServer(models=("hulk", "loki"))
+        models = cllm.list_models(_cfg(), LAN1, opener=server)
+        self.assertEqual(models, ["hulk", "loki"])
+        self.assertTrue(server.requests[0].full_url.endswith("/models"))
+
+    def test_raises_on_failure(self):
+        server = FakeServer(fail_hosts={"192.168.210.210"})
+        with self.assertRaises(cllm.LlmError):
+            cllm.list_models(_cfg(), LAN1, opener=server)
+
     def test_multiline_recent_command_drops_pem_block(self):
         # A heredoc history entry that writes a private key must not ship the
         # key body — redact_lines drops the PEM block whole.

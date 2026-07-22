@@ -32,6 +32,7 @@ from agent_terminal.copilot import risk as risk_mod
 
 _PLACEHOLDER = re.compile(r"<[a-z0-9_]+>")
 _MAX_RECENT = 12
+_USER_AGENT = "agent-terminal/0.1"
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
@@ -242,7 +243,11 @@ class OpenAIProvider:
 
     def _request(self, path, body):
         url = self.endpoint.base_url.rstrip("/") + path
-        headers = {"Content-Type": "application/json"}
+        # Send an explicit User-Agent: urllib's default "Python-urllib/x.y"
+        # is blocked with 403 by WAFs in front of some gateways (e.g. the
+        # centinel LiteLLM proxy). Any non-urllib UA passes.
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": _USER_AGENT}
         if self.endpoint.api_key:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
         request = urllib.request.Request(
@@ -263,6 +268,15 @@ class OpenAIProvider:
         try:
             return payload["data"][0]["id"]
         except (KeyError, IndexError, TypeError) as exc:
+            raise LlmError("no models advertised") from exc
+
+    def list_models(self):
+        """All model ids the endpoint advertises (for the model picker)."""
+        payload = self._request("/models", None)
+        try:
+            return [m["id"] for m in payload["data"]
+                    if isinstance(m, dict) and m.get("id")]
+        except (KeyError, TypeError) as exc:
             raise LlmError("no models advertised") from exc
 
     def complete(self, messages, *, json_mode=False) -> str:
@@ -389,3 +403,11 @@ def explain(config, command, *, chain=None, opener=None) -> Completion:
         config, explain_messages(command, config.system_suffix),
         json_mode=False, chain=chain, opener=opener)
     return Completion(text.strip(), label)
+
+
+def list_models(config, endpoint, *, opener=None) -> list[str]:
+    """Models the endpoint advertises (GET /models). Raises LlmError on any
+    network/parse problem — the caller runs it on a worker thread."""
+    provider = OpenAIProvider(endpoint, timeout_s=config.timeout_s,
+                              opener=opener)
+    return provider.list_models()
