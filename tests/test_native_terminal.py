@@ -725,7 +725,11 @@ class SourceGuardrailTests(unittest.TestCase):
     def test_terminal_uses_vte(self):
         self.assertIn("Vte.Terminal()", SOURCE)
         self.assertIn("spawn_async", SOURCE)
-        self.assertIn(nt.CONTROL_SOCKET_ENV, SOURCE)
+        # The control-socket env var now lives in tui_core; the terminal still
+        # exports it to child processes (re-exported name used in the spawn).
+        self.assertEqual(nt.CONTROL_SOCKET_ENV,
+                         "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET")
+        self.assertIn("env[CONTROL_SOCKET_ENV] = control_socket_path", SOURCE)
 
     def test_picker_window_is_transient(self):
         self.assertIn("set_transient_for(", SOURCE)

@@ -13,6 +13,22 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 
+# The control-socket env var and the viewer file-type predicates live here
+# (the shared, GTK-free core) so the standalone TUI subprocesses — smart-ls
+# and the file picker — depend only on this module, never on the GTK terminal
+# shell. `native_terminal` re-exports them for its own use and back-compat.
+CONTROL_SOCKET_ENV = "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET"
+MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mkd")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def is_markdown_path(path) -> bool:
+    return str(path).lower().endswith(MARKDOWN_EXTENSIONS)
+
+
+def is_image_path(path) -> bool:
+    return str(path).lower().endswith(IMAGE_EXTENSIONS)
+
 
 @dataclass(frozen=True)
 class PickerEntry:

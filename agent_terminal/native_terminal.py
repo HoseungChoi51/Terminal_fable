@@ -46,11 +46,15 @@ from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
 from agent_terminal.copilot import resume as copilot_resume
 from agent_terminal.copilot import jobs as copilot_jobs
+# Re-exported from the shared TUI core so the standalone subprocesses depend
+# only on tui_core; kept importable from here for internal use + back-compat.
+from agent_terminal.tui_core import (  # noqa: F401
+    CONTROL_SOCKET_ENV, IMAGE_EXTENSIONS, MARKDOWN_EXTENSIONS,
+    is_image_path, is_markdown_path)
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
 APP_TITLE = "Agent Terminal"
-CONTROL_SOCKET_ENV = "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET"
 CONFIG_PATH = "~/.config/agent-terminal/native.json"
 
 
@@ -970,20 +974,10 @@ def layout_fit_focused(root, pane_id, share=FIT_FOCUSED_SHARE):
 # Markdown helpers
 # ---------------------------------------------------------------------------
 
-MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mkd")
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 SAFE_URI_SCHEMES = ("http", "https", "mailto", "file")
 
 HEADING_POINT_SIZES = {1: 22.0, 2: 18.0, 3: 15.0, 4: 13.0, 5: 12.0, 6: 11.0}
 BASE_TEXT_POINT_SIZE = 10.5
-
-
-def is_markdown_path(path) -> bool:
-    return str(path).lower().endswith(MARKDOWN_EXTENSIONS)
-
-
-def is_image_path(path) -> bool:
-    return str(path).lower().endswith(IMAGE_EXTENSIONS)
 
 
 def heading_point_size(level: int, zoom: float = 1.0) -> float:
