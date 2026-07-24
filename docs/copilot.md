@@ -111,6 +111,16 @@ language model, both **off by default** and gated:
   classifier can't vouch for — still waits for your Enter. Auto-pilot is
   `assistant.ask.auto_pilot` (off by default).
 
+  Ask mode also sends a **distilled view of the task you're on** — the
+  recent commands in this working session (an *episode*, split at idle
+  gaps and directory changes) with the salient command's output **digested
+  to its errors/summary** rather than the raw log, so answers are grounded
+  in what actually happened without a 10k-line prompt. The ⌁ ASK bar
+  header shows the task the copilot inferred
+  (`task: project: cargo test · 6 min · 3 cmds · 2 failures`) so you can
+  see what it's working from. How much output is included is
+  `assistant.llm.send_output` (default `"digest"`; see below).
+
   A **status bar** along the window bottom always shows the attached
   model, abbreviated (e.g. `⌁ copilot: loki`). Click it or press
   **Ctrl+Shift+M** to open the **model picker** — it shows the full
@@ -288,7 +298,7 @@ missing or invalid values fall back to the defaults shown here:
     "recipes": {"enabled": true},
     "llm": {"provider": "openai", "base_url": "https://api.openai.com/v1",
             "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY",
-            "allow_remote_context": false, "send_output": false,
+            "allow_remote_context": false, "send_output": "digest",
             "timeout_s": 30},
     "ask": {"enabled": true, "auto_pilot": false,
             "auto_pilot_max_risk": "local-change", "carry_draft": true,
@@ -317,7 +327,10 @@ missing or invalid values fall back to the defaults shown here:
 - `llm.allow_remote_context` — opt-in for the internet tier only; LAN/on-device work without it.
 - `llm.auth_path` — path to auth.json (endpoint chain + keys); default searches the standard locations.
 - `llm.base_url` / `llm.model` / `llm.api_key_env` — single-endpoint fallback when no auth.json.
-- `llm.send_output` — also send redacted command output as context (default off).
+- `llm.send_output` — how much terminal output ask mode sends as context:
+  `"none"` (commands only), `"digest"` (a distilled, redacted digest of the
+  salient command — the default), or `"full"` (the redacted verbose tail).
+  Legacy booleans still parse (`false`→none, `true`→full).
 - `llm.system_suffix` — appended to the system prompt (endpoint quirks, e.g. `/no_think`).
 - `llm.timeout_s` — per-request timeout (bounds each endpoint before falling to the next).
 - `ask.enabled` — enable ask mode (Ctrl+?); on by default.

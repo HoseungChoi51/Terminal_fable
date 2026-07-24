@@ -55,6 +55,16 @@ class ConfigTests(unittest.TestCase):
             {"journal": {"max_commands": -5}})
         self.assertEqual(cfg.journal.max_commands, 0)
 
+    def test_send_output_tri_state(self):
+        p = cconfig.parse_assistant_config
+        self.assertEqual(p({}).llm.send_output, "digest")          # default
+        for value, want in ((False, "none"), (True, "full"),
+                            ("full", "full"), ("none", "none"),
+                            ("digest", "digest"), ("garbage", "digest"),
+                            (3, "digest")):
+            got = p({"llm": {"send_output": value}}).llm.send_output
+            self.assertEqual(got, want, value)
+
 
 class RedactTests(unittest.TestCase):
     def assertRedacts(self, text, leaked):
@@ -193,6 +203,13 @@ class JournalTests(unittest.TestCase):
         record = self.journal.last_record()
         self.assertIsNone(record.cmd)
         self.assertEqual(record.capture, cjournal.CAPTURE_NONE)
+
+    def test_finalize_builds_digest_from_redacted_output(self):
+        self.run_command(lines=("compiling", "error: boom", "trailing"),
+                         start_row=10, end_row=14)
+        record = self.journal.last_record()
+        self.assertIsNotNone(record.digest)
+        self.assertIn("error: boom", record.digest.render())
 
     def test_output_tail_drops_pem_split_by_window(self):
         # The private-key BEGIN sits just above the 2-line tail window; the

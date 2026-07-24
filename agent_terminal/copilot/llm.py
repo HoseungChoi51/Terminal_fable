@@ -138,8 +138,13 @@ def _redact_multiline(text) -> str:
 
 def build_context(*, cwd=None, project=None, recent_commands=(),
                   draft_command=None, output_tails=None,
-                  send_output=False) -> str:
-    """Assemble a compact context block — every field redacted."""
+                  send_output="none", activity=None) -> str:
+    """Assemble a compact context block — every field redacted.
+
+    When `activity` (a pre-built, already-redacted episode block from
+    copilot.askcontext) is given it replaces the flat recent-commands /
+    output section; the legacy path (no activity) is kept for summarize().
+    """
     lines = []
     if project:
         lines.append(f"project: {_redact_multiline(project)}")
@@ -155,6 +160,11 @@ def build_context(*, cwd=None, project=None, recent_commands=(),
         else:
             lines.append("draft command:")
             lines.extend("  " + line for line in redacted)
+    if activity is not None and str(activity).strip():
+        # Belt-and-braces: the block is built from already-redacted digests
+        # and commands, but re-run redaction at the choke point anyway.
+        lines.append(_redact_multiline(activity))
+        return "\n".join(lines)
     recent = [c for c in recent_commands if c][-_MAX_RECENT:]
     if recent:
         lines.append("recent commands:")
@@ -163,7 +173,9 @@ def build_context(*, cwd=None, project=None, recent_commands=(),
             # whole block so a private-key body is never sent line-by-line.
             redacted, _ = redact.redact_lines(str(command).splitlines())
             lines.extend("  " + line for line in redacted)
-    if send_output and output_tails:
+    # This legacy path (summarize) can't digest, so it emits raw tails only
+    # under "full"; "digest" output flows through ask mode's `activity`.
+    if send_output in (True, "full") and output_tails:
         lines.append("recent output:")
         for tail in output_tails[-3:]:
             redacted, _ = redact.redact_lines(tail or ())
@@ -375,11 +387,11 @@ def _run_chain(config, messages, *, json_mode, chain=None, opener=None):
 
 
 def suggest_commands(config, *, query, cwd=None, project=None,
-                     recent_commands=(), draft_command=None, chain=None,
-                     opener=None) -> IntentResult:
+                     recent_commands=(), draft_command=None, activity=None,
+                     chain=None, opener=None) -> IntentResult:
     context = build_context(cwd=cwd, project=project,
                             recent_commands=recent_commands,
-                            draft_command=draft_command)
+                            draft_command=draft_command, activity=activity)
     text, label = _run_chain(
         config, intent_messages(query, context, config.system_suffix),
         json_mode=True, chain=chain, opener=opener)

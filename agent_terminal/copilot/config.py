@@ -57,7 +57,12 @@ class LlmConfig:
     # standard locations (env AGENT_TERMINAL_AUTH_JSON, the config dir).
     auth_path: str | None = None
     allow_remote_context: bool = False
-    send_output: bool = False
+    # Terminal output sent as context, tri-state:
+    #   "none"   — send no output (privacy floor)
+    #   "digest" — send a distilled, redacted digest (default)
+    #   "full"   — send the redacted verbose tail
+    # Legacy booleans still parse: false -> "none", true -> "full".
+    send_output: str = "digest"
     timeout_s: int = 30
     # Appended to the system prompt; lets endpoint quirks be handled by
     # config alone (e.g. "/no_think" to disable Qwen thinking on Ollama).
@@ -127,8 +132,21 @@ def _parse_section(cls, payload):
     values = {}
     for spec in fields(cls):
         default = getattr(defaults, spec.name)
-        values[spec.name] = _coerce(payload.get(spec.name), default)
+        if spec.name == "send_output":
+            values[spec.name] = _send_output_mode(
+                payload.get(spec.name), default)
+        else:
+            values[spec.name] = _coerce(payload.get(spec.name), default)
     return cls(**values)
+
+
+def _send_output_mode(value, default):
+    """Tri-state coercion: bool false/true -> none/full; valid strings pass."""
+    if isinstance(value, bool):
+        return "full" if value else "none"
+    if isinstance(value, str) and value.lower() in ("none", "digest", "full"):
+        return value.lower()
+    return default
 
 
 _SECTIONS = {

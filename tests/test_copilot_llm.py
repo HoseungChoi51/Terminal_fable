@@ -382,6 +382,21 @@ class PrivacyFallbackTests(unittest.TestCase):
         self.assertIn("recent output", sent)
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
 
+    def test_activity_block_replaces_recent_and_is_re_redacted(self):
+        server = FakeServer(content='{"commands":[]}')
+        activity = ("task: proj: cargo · 2 cmds · 1 failure\n"
+                    "$ cargo build  (exit 101)\n"
+                    "    error[E0499]: leaked AKIAIOSFODNN7EXAMPLE\n")
+        cllm.suggest_commands(
+            _cfg(allow_remote_context=True), query="fix it",
+            recent_commands=["should-not-appear"], activity=activity,
+            chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertIn("task: proj", sent)               # activity block sent
+        self.assertIn("error[E0499]", sent)
+        self.assertNotIn("should-not-appear", sent)     # recent_commands dropped
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)  # re-redacted at choke
+
     def test_project_and_draft_and_query_redacted(self):
         server = FakeServer(content='{"commands":[]}')
         cllm.suggest_commands(

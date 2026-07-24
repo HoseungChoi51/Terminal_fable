@@ -109,5 +109,41 @@ class AskContextTests(unittest.TestCase):
         self.assertNotIn("secret", ctx.lower())
 
 
+class OutputModeTests(unittest.TestCase):
+    """The tri-state send_output knob threaded through as output_mode."""
+
+    def _cargo(self):
+        return _episode([rec("cargo build", exit_code=101, started_at=1000,
+                             output_lines=CARGO_ERR)])
+
+    def test_none_sends_commands_only(self):
+        # "none" keeps the command lines but strips every output line.
+        ctx = askcontext.build_ask_context(
+            self._cargo(), question="why fail?", output_mode="none")
+        self.assertIn("$ cargo build", ctx)
+        self.assertNotIn("error[E0499]", ctx)
+        self.assertNotIn("could not compile", ctx)
+
+    def test_digest_is_the_default(self):
+        default = askcontext.build_ask_context(self._cargo(), question="x")
+        explicit = askcontext.build_ask_context(
+            self._cargo(), question="x", output_mode="digest")
+        self.assertEqual(default, explicit)
+        self.assertIn("error[E0499]", default)
+
+    def test_full_sends_the_verbose_tail_not_the_digest(self):
+        # "full" reads output_tail verbatim (here noise a digest would elide).
+        tail = [f"progress {i}" for i in range(30)] + ["error: boom"]
+        record = SimpleNamespace(
+            seq=0, cmd="make", cwd="/home/x/proj", started_at=1000.0,
+            duration_s=1.0, exit_code=2, output_tail=tail,
+            digest=digest_mod.digest_output(tail), branch=None)
+        ctx = askcontext.build_ask_context(
+            _episode([record]), question="why?", output_mode="full")
+        self.assertIn("$ make", ctx)
+        self.assertIn("error: boom", ctx)
+        self.assertIn("progress 29", ctx)   # a raw tail line the digest drops
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,8 @@ from agent_terminal.copilot import suggest as copilot_suggest
 from agent_terminal.copilot import titles as copilot_titles
 from agent_terminal.copilot import typo as copilot_typo
 from agent_terminal.copilot import ask as copilot_ask
+from agent_terminal.copilot import episode as copilot_episode
+from agent_terminal.copilot import askcontext as copilot_askcontext
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -1529,6 +1531,8 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
              background-color: alpha(#6ab0ff, 0.9); }
 .ask-seed { font-family: monospace; font-size: 0.82em;
             color: alpha(currentColor, 0.6); }
+.ask-task { font-size: 0.8em; color: alpha(currentColor, 0.55);
+            font-style: italic; }
 .ask-question { color: alpha(currentColor, 0.85); font-size: 0.9em; }
 /* Persistent copilot status bar along the window bottom. */
 .status-bar { padding: 2px 10px; border-top: 1px solid alpha(currentColor,
@@ -4169,6 +4173,15 @@ def build_native_classes(g):
             entry_row.append(entry)
             entry_row.append(spinner)
             content.append(header)
+            # The model's-eye view: which task the copilot thinks you're on.
+            # If the segmentation is wrong you see it here (trust surface).
+            episode_now = self._current_episode()
+            if episode_now is not None and episode_now.records:
+                task_lbl = Gtk.Label(label=f"task: {episode_now.headline()}")
+                task_lbl.set_xalign(0.0)
+                task_lbl.set_wrap(True)
+                task_lbl.add_css_class("ask-task")
+                content.append(task_lbl)
             if session.parked:
                 # Redact the chip too: a credential mid-typed on the prompt
                 # must not render verbatim (shoulder-surf / screen share).
@@ -4390,13 +4403,19 @@ def build_native_classes(g):
                 state["busy"] = True
                 cfg, ch = llm_cfg, chain
                 context = self._assistant_context()
+                episode = context.pop("episode")
                 draft = session.seed or None
+                # The distilled, redacted terminal-activity block — salience
+                # ranked by this question. send_output gates what's included.
+                activity = (copilot_askcontext.build_ask_context(
+                    episode, question=query, draft=session.seed or "",
+                    output_mode=llm_cfg.send_output) if episode else None)
 
                 def work():
                     try:
                         result = copilot_llm.suggest_commands(
-                            cfg, query=query, chain=ch,
-                            draft_command=draft, **context)
+                            cfg, query=query, chain=ch, draft_command=draft,
+                            activity=activity, **context)
                         GLib.idle_add(on_result, result)
                     except copilot_llm.LlmError as exc:
                         GLib.idle_add(on_error, str(exc))
@@ -4464,21 +4483,27 @@ def build_native_classes(g):
             return next((p for p in tab.panes.values()
                          if p.kind == "terminal"), None)
 
-        def _assistant_context(self):
-            """cwd + project + recent commands from the recent terminal pane."""
+        def _current_episode(self):
+            """The task the recent terminal is on (for the ask-bar header and
+            context), or None with no shell integration."""
             pane = self._recent_terminal_pane()
-            cwd, recent = None, []
+            journal = getattr(pane, "journal", None) if pane else None
+            if journal is None:
+                return None
+            return copilot_episode.current_episode(journal.snapshot())
+
+        def _assistant_context(self):
+            """cwd + project + the current episode from the recent terminal."""
+            pane = self._recent_terminal_pane()
+            cwd = None
             if pane is not None:
                 try:
                     cwd = pane.current_directory()
                 except Exception:
                     cwd = None
-                journal = getattr(pane, "journal", None)
-                if journal is not None:
-                    recent = [r.cmd for r in journal.snapshot() if r.cmd]
             project = os.path.basename(cwd.rstrip("/")) if cwd else None
             return {"cwd": cwd, "project": project or None,
-                    "recent_commands": recent}
+                    "episode": self._current_episode()}
 
         def toggle_copilot_pause(self):
             pane = self._active_pane()

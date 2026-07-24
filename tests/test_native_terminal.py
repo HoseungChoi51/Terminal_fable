@@ -790,6 +790,19 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_ask_mode_sends_digested_episode_activity(self):
+        # submit_question must derive the current episode, build the
+        # distilled+redacted activity block from it, and pass it to the LLM
+        # as `activity=` — never dump raw output. (Guards the wiring the
+        # GTK e2e exercises end-to-end.)
+        self.assertIn("def _current_episode(self)", SOURCE)
+        self.assertIn("copilot_askcontext.build_ask_context(", SOURCE)
+        self.assertIn("output_mode=llm_cfg.send_output", SOURCE)
+        self.assertIn("activity=activity", SOURCE)
+        # the ask bar surfaces the inferred task so a bad segmentation shows
+        self.assertIn("episode_now = self._current_episode()", SOURCE)
+        self.assertIn('"ask-task"', SOURCE)
+
 
 class BuildInfoTests(unittest.TestCase):
     def test_reads_current_repo_revision(self):

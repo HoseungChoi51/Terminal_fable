@@ -60,3 +60,13 @@ cloud model now and swap to a small local model later without a rewrite.
   blocks the UI; summaries fall back to the heuristic version.
 - Adding another provider means another `complete()` implementation
   behind the same chain and redaction — the choke point stays put.
+- **Amendment (terminal output as context).** `send_output` became a
+  tri-state `false | "digest" | "full"`, default **`"digest"`**: ask mode
+  now sends a *distilled, redacted* digest of the salient command's output
+  (via `copilot.digest` / `copilot.askcontext`) by default, not nothing.
+  This stays inside the choke point — the digest is built from
+  already-`redact_lines`'d output and only ever drops lines (it can't
+  reintroduce a secret redaction removed), and the assembled block is
+  re-redacted in `build_context`. It sends far less than a raw log
+  (bounded by a byte budget), so the default egress is a handful of
+  distilled lines, gated by the same local-first / remote opt-in tiers.

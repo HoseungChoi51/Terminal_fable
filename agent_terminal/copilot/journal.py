@@ -20,6 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from agent_terminal.copilot.config import JournalConfig
+from agent_terminal.copilot.digest import Digest, digest_output
 from agent_terminal.copilot.redact import redact_lines
 
 # Termprop names double as event names in apply_batch input.
@@ -49,6 +50,9 @@ class CommandRecord:
     output_tail: tuple[str, ...] | None
     capture: str = CAPTURE_NONE
     redacted: bool = False
+    # Distilled output for LLM context (built from the redacted output at
+    # finalize; transient — never persisted in a session).
+    digest: Digest | None = None
 
 
 def decode_command_payload(value) -> str | None:
@@ -162,6 +166,7 @@ class PaneJournal:
         pending = self._pending
         self._pending = None
         tail = None
+        dg = None
         redacted = False
         if (self.config.store_output and read_rows is not None
                 and cursor_row is not None and pending.exec_row is not None
@@ -176,6 +181,7 @@ class PaneJournal:
             if lines:
                 red, redacted = redact_lines(lines)
                 tail = tuple(red[-keep:]) if keep else ()
+                dg = digest_output(red)   # distil the REDACTED output
         cmd = pending.cmd
         cmd_redacted = False
         if cmd is not None:
@@ -193,6 +199,7 @@ class PaneJournal:
             output_tail=tail,
             capture=CAPTURE_TERMPROP if cmd is not None else CAPTURE_NONE,
             redacted=redacted or cmd_redacted,
+            digest=dg,
         ))
 
     # -- queries ----------------------------------------------------------

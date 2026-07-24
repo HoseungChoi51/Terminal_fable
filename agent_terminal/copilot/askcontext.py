@@ -59,11 +59,17 @@ def _salient_record(records, query):
     return records[-1] if records else None
 
 
-def _detail(lines, record, *, cap, errors_only):
-    """Append a command line + its digest (optionally errors-only)."""
+def _detail(lines, record, *, cap, errors_only, output_mode):
+    """Append a command line + (per output_mode) its digest / tail."""
     if not record.cmd:
         return
     lines.append(f"$ {_first_line(record.cmd)}{_exit_suffix(record)}")
+    if output_mode == "none":
+        return
+    if output_mode == "full" and record.output_tail:
+        for text in record.output_tail[-cap:]:
+            lines.append(f"    {text}")
+        return
     dg = getattr(record, "digest", None)
     if dg is not None and not dg.is_empty():
         shown = 0
@@ -94,8 +100,11 @@ def _fit(lines, budget_chars) -> str:
 
 
 def build_ask_context(episode, *, question="", draft="",
-                      budget_chars=3000) -> str:
-    """The activity block ask mode sends as terminal context (or "")."""
+                      output_mode="digest", budget_chars=3000) -> str:
+    """The activity block ask mode sends as terminal context (or "").
+
+    output_mode: "none" (commands only) | "digest" | "full" (verbose tail).
+    """
     if episode is None or not episode.records:
         return ""
     records = list(episode.records)
@@ -106,13 +115,15 @@ def build_ask_context(episode, *, question="", draft="",
 
     salient = _salient_record(records, query)
     if salient is not None:
-        _detail(lines, salient, cap=_DETAIL_DIGEST_LINES, errors_only=False)
+        _detail(lines, salient, cap=_DETAIL_DIGEST_LINES, errors_only=False,
+                output_mode=output_mode)
         detailed.add(id(salient))
 
     for record in records:
         if id(record) in detailed or record.exit_code in (0, None):
             continue
-        _detail(lines, record, cap=_ERROR_DIGEST_LINES, errors_only=True)
+        _detail(lines, record, cap=_ERROR_DIGEST_LINES, errors_only=True,
+                output_mode=output_mode)
         detailed.add(id(record))
 
     others = [r for r in records if id(r) not in detailed and r.cmd]
