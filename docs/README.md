@@ -31,6 +31,9 @@ trying to do.
 - **[decisions/](decisions/README.md)** — Architecture Decision Records explaining
   *why* the big choices were made (VTE for emulation, a custom layout widget, the
   GTK-free core).
+- **[design-log/](design-log/README.md)** — a running record of *what was asked
+  and why*, one entry per planning effort: the request (rephrased), the
+  clarifying questions and the choices that shaped scope.
 
 ### …contribute to it
 
