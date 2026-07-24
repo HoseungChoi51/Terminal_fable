@@ -129,6 +129,25 @@ class OptionTests(unittest.TestCase):
         config = nt.load_native_config("/nonexistent/native.json")
         self.assertEqual(config, nt.NativeConfig())
 
+    def test_config_assistant_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "native.json"
+            config_path.write_text(json.dumps({
+                "assistant": {"shell_integration": False,
+                              "journal": {"max_commands": 12}},
+            }))
+            config = nt.load_native_config(config_path)
+            self.assertTrue(config.assistant.enabled)
+            self.assertFalse(config.assistant.shell_integration)
+            self.assertEqual(config.assistant.journal.max_commands, 12)
+        # defaults when the section is absent or malformed
+        self.assertTrue(nt.NativeConfig().assistant.enabled)
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "native.json"
+            config_path.write_text(json.dumps({"assistant": "bogus"}))
+            config = nt.load_native_config(config_path)
+            self.assertTrue(config.assistant.shell_integration)
+
     def test_control_socket_path_is_process_local(self):
         path = nt.default_control_socket_path(1234)
         self.assertIn("agent-terminal-native-1234.sock", path)
@@ -571,6 +590,8 @@ class ActionTests(unittest.TestCase):
         "copy", "paste", "select-all", "find", "find-next", "find-previous",
         "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
+        "copilot-menu", "copilot-ask", "copilot-pause", "copilot-sessions",
+        "copilot-debug",
         "shortcuts", "preferences", "quit",
     )
 
@@ -596,6 +617,24 @@ class ActionTests(unittest.TestCase):
         self.assertIn("<Ctrl><Shift>v", nt.ACCELERATORS["paste"])
         self.assertIn("<Ctrl><Shift>f", nt.ACCELERATORS["find"])
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
+        self.assertIn("<Ctrl><Shift>s", nt.ACCELERATORS["copilot-sessions"])
+        self.assertIn("<Ctrl><Shift>space", nt.ACCELERATORS["copilot-menu"])
+        self.assertIn("<Ctrl>question", nt.ACCELERATORS["copilot-ask"])
+        self.assertIn("<Ctrl><Shift>slash", nt.ACCELERATORS["copilot-ask"])
+        self.assertIn("<Alt><Shift>a", nt.ACCELERATORS["copilot-pause"])
+
+    def test_copilot_accelerators_not_reserved(self):
+        for action in ("copilot-menu", "copilot-pause", "copilot-sessions"):
+            for accel in nt.ACCELERATORS[action]:
+                self.assertNotIn(accel, nt.RESERVED_PLAIN_ACCELERATORS)
+
+    def test_copilot_session_shortcut_is_unique(self):
+        seen = {}
+        for action, accels in nt.ACCELERATORS.items():
+            for accel in accels:
+                self.assertNotIn(accel, seen,
+                                 f"{accel} on {action} and {seen.get(accel)}")
+                seen[accel] = action
         self.assertIn("<Ctrl><Shift>h", nt.ACCELERATORS["shortcuts"])
         self.assertIn("F1", nt.ACCELERATORS["shortcuts"])
 
@@ -703,6 +742,192 @@ class SourceGuardrailTests(unittest.TestCase):
     def test_shortcut_guide_has_dismiss_control(self):
         self.assertIn('Gtk.Button(label="Close")', SOURCE)
 
+    def test_only_one_guarded_submit_byte(self):
+        # Ask mode is the sole place a submit byte (CR) is fed to a shell,
+        # and only under `if run:` (auto-pilot cleared it). Nothing else in
+        # the app may press Enter for the user.
+        cr = 'insert_text("\\r")'
+        self.assertEqual(SOURCE.count(cr), 1,
+                         "exactly one carriage-return feed expected")
+        self.assertIn('if run:\n                pane.insert_text("\\r")',
+                      SOURCE)
+        self.assertNotIn('insert_text("\\n")', SOURCE)
+
+    def test_ask_take_goes_through_can_take(self):
+        # The take path must consult the single-line/risk gate before it
+        # ever inserts a command.
+        self.assertIn("copilot_ask.can_take(", SOURCE)
+        self.assertIn("def _ask_commit(self, pane, command, run)", SOURCE)
+
+    def test_answer_focus_yields_to_typeahead(self):
+        # Focus moves to the answer card only when the entry is not focused
+        # (matching hotkeys_armed), so a follow-up being typed is never
+        # yanked into the Y/N/T hotkeys and click-away keystrokes stay
+        # captured rather than reaching the shell.
+        self.assertIn('state["card"] is not None and not entry.has_focus()',
+                      SOURCE)
+
+    def test_ask_bar_is_non_modal_revealer(self):
+        # Ask mode is an in-window revealer, never a modal popover that could
+        # grab the window or trap keystrokes (the reported bug).
+        self.assertIn("self._ask_revealer.set_reveal_child(True)", SOURCE)
+        self.assertIn("def close_ask()", SOURCE)
+        # parking the shell line still only when an endpoint is eligible
+        self.assertIn("if eligible and ask_cfg.carry_draft", SOURCE)
+        # the ask surface no longer creates a modal popover
+        self.assertNotIn("_ask_popover", SOURCE)
+        # a tab switch dismisses the window-level bar (no stale-pane ops)
+        self.assertIn("def _on_switch_page(self, notebook, page_widget",
+                      SOURCE)
+        switch = SOURCE.split("def _on_switch_page(", 1)[1][:500]
+        self.assertIn("self._ask_close()", switch)
+
+    def test_status_bar_and_model_picker_wired(self):
+        self.assertIn("copilot-model", nt.ACTION_NAMES)
+        self.assertIn("<Ctrl><Shift>m", nt.ACCELERATORS["copilot-model"])
+        self.assertIn("def _build_status_bar(self)", SOURCE)
+        self.assertIn("def _copilot_status_text(self", SOURCE)
+        self.assertIn("def show_model_picker(self)", SOURCE)
+        self.assertIn('"win.copilot-model"', SOURCE)
+
+    def test_naming_wired(self):
+        # Manual rename + LLM name suggestions; a name overrides the inferred
+        # title, and the naming context is the redacted digest (not raw).
+        self.assertIn("def rename(self, name):", SOURCE)              # pane
+        self.assertIn("def rename_window(self, name):", SOURCE)
+        self.assertIn("def rename_active_pane(self)", SOURCE)
+        self.assertIn("def show_name_workspace(self)", SOURCE)
+        self.assertIn("copilot_llm.suggest_names(", SOURCE)
+        self.assertIn("pane-rename", nt.ACTION_NAMES)
+        self.assertIn("window-rename", nt.ACTION_NAMES)
+        self.assertIn("workspace-name", nt.ACTION_NAMES)
+        self.assertIn("F2", nt.ACCELERATORS["pane-rename"])
+        # the manual/LLM name wins over the inferred title in every setter
+        # (the copilot-inferred path, the VTE-title path, and the flush path)
+        self.assertGreaterEqual(
+            SOURCE.count("if self._name_override is not None:"), 2)
+        self.assertIn("and self._name_override is None", SOURCE)
+        # naming feeds the model the redacted digest, not raw output
+        self.assertIn('output_mode="digest", budget_chars=800', SOURCE)
+        # suggestions are applied only from the Apply button (never silently)
+        self.assertIn("def _show_name_dialog(self, panes, result)", SOURCE)
+
+    def test_live_pane_move_wired(self):
+        # Moving a pane between windows must reparent it alive: detach without
+        # disposing (that would kill the process), then adopt with rebound
+        # window callbacks.
+        self.assertIn("def detach_pane(self, pane_id)", SOURCE)
+        self.assertIn("def adopt_pane(self, pane, orientation=HORIZONTAL)",
+                      SOURCE)
+        self.assertIn("def eject_active_pane(self)", SOURCE)
+        self.assertIn("def send_active_pane_to(self, target)", SOURCE)
+        self.assertIn("pane-eject", nt.ACTION_NAMES)
+        self.assertIn("pane-send", nt.ACTION_NAMES)
+        self.assertIn("<Alt><Shift>e", nt.ACCELERATORS["pane-eject"])
+        # detach unparents the widget but never disposes the pane
+        detach = SOURCE.split("def detach_pane(self, pane_id):", 1)[1] \
+            .split("def adopt_pane", 1)[0]
+        self.assertIn("self.container.remove_pane(pane_id)", detach)
+        self.assertNotIn("pane.dispose()", detach)
+        # adopt rebinds the window-scoped exit callback to the new window
+        self.assertIn("pane.on_exited = self.window._on_pane_exited", SOURCE)
+        # the tab-click controller is tracked so a move can swap it out
+        self.assertIn("pane._tab_click = click", SOURCE)
+
+    def test_workspace_job_restore_wired(self):
+        # Detected jobs restore as one bounded split-pane window (packing),
+        # with an act-then-revert bar (auto-revert timer + Keep/Revert).
+        self.assertIn("def _restore_job(self, job", SOURCE)
+        self.assertIn("def _load_workspace(self, plan)", SOURCE)
+        self.assertIn("def _show_confirm_revert(self, message, on_revert",
+                      SOURCE)
+        self.assertIn("copilot_jobs.cluster(", SOURCE)
+        self.assertIn("copilot_jobs.pack(", SOURCE)
+        self.assertIn("def new_window(self)", SOURCE)
+        # act-then-revert: an auto-revert countdown + revert closes what opened
+        self.assertIn("GLib.timeout_add_seconds(1, tick)", SOURCE)
+        self.assertIn("on_revert=lambda: [w.close() for w in created]", SOURCE)
+        # packing is fed the real monitor + cell metrics (the legibility floor)
+        self.assertIn("def _workspace_avail_px(self)", SOURCE)
+        self.assertIn("def _workspace_cell_px(self)", SOURCE)
+        self.assertIn("get_char_width()", SOURCE)
+
+    def test_episode_resume_wired(self):
+        # Restoring a session resumes an *episode*: a pane at the episode cwd
+        # with a history seed file, passed via extra_env to the spawn.
+        self.assertIn("def _restore_episode(self, episode, summary, index",
+                      SOURCE)
+        self.assertIn("def _write_seed_file(self, episode, tag)", SOURCE)
+        self.assertIn("copilot_resume.episodes_of(", SOURCE)
+        self.assertIn("copilot_resume.seed_file_content(", SOURCE)
+        self.assertIn('"AGENT_TERMINAL_SEED_HISTFILE": seed', SOURCE)
+        # the seed reaches the child through the pane spawn env
+        self.assertIn("def create_terminal_pane(self, command=None, "
+                      "working_directory=None,", SOURCE)
+        self.assertIn("extra_env=extra_env", SOURCE)
+        # "Restore" resumes the most recent episode; the browser lists the rest
+        self.assertIn("self._restore_episode(episodes[-1], summary, "
+                      "len(episodes) - 1)", SOURCE)
+
+    def test_digest_mode_ab_toggle_wired(self):
+        # The heuristic<->LLM context A/B switch: an action + accelerator, a
+        # session override read at submit time, and an injected summarizer
+        # that runs on the worker thread (never blocking the UI) and falls
+        # back to the heuristic digest.
+        self.assertIn("copilot-digest-mode", nt.ACTION_NAMES)
+        self.assertIn("<Ctrl><Shift>d", nt.ACCELERATORS["copilot-digest-mode"])
+        self.assertIn("def toggle_copilot_digest_mode(self)", SOURCE)
+        self.assertIn("def _effective_digest_mode(self, llm_cfg)", SOURCE)
+        self.assertIn("self._digest_mode_override", SOURCE)
+        # the summarizer is built inside the ask-mode work() (worker thread),
+        # not on the GTK thread, because it makes a network call
+        submit = SOURCE.split("def submit_question(", 1)[1].split(
+            "threading.Thread", 1)[0]
+        self.assertIn("def work():", submit)
+        self.assertIn("_llm_summarizer(cfg, ch, query)", submit)
+        self.assertIn('mode == "llm"', submit)
+        # the summarizer itself must degrade to the heuristic digest
+        self.assertIn("def _llm_summarizer(cfg, chain, question)", SOURCE)
+
+    def test_ask_mode_sends_digested_episode_activity(self):
+        # submit_question must derive the current episode, build the
+        # distilled+redacted activity block from it, and pass it to the LLM
+        # as `activity=` — never dump raw output. (Guards the wiring the
+        # GTK e2e exercises end-to-end.)
+        self.assertIn("def _current_episode(self)", SOURCE)
+        self.assertIn("copilot_askcontext.build_ask_context(", SOURCE)
+        self.assertIn("output_mode=cfg.send_output", SOURCE)
+        self.assertIn("activity=activity", SOURCE)
+        # the ask bar surfaces the inferred task so a bad segmentation shows
+        self.assertIn("episode_now = self._current_episode()", SOURCE)
+        self.assertIn('"ask-task"', SOURCE)
+
+
+class BuildInfoTests(unittest.TestCase):
+    def test_reads_current_repo_revision(self):
+        info = nt.resolve_build_info(REPO_ROOT)
+        self.assertNotEqual(info.branch, "unknown")
+        self.assertRegex(info.commit, r"^[0-9a-f]{7,}$")
+
+    def test_non_git_dir_falls_back_to_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = nt.resolve_build_info(tmp)
+            self.assertEqual(info.branch, "unknown")
+            self.assertEqual(info.commit, "unknown")
+            self.assertFalse(info.dirty)
+
+    def test_describe(self):
+        self.assertEqual(nt.BuildInfo("main", "abc1234").describe(),
+                         "main @ abc1234")
+        self.assertIn("+dirty",
+                      nt.BuildInfo("x", "y", dirty=True).describe())
+        self.assertIn("unknown", nt.BuildInfo().describe())
+
+    def test_about_action_wired(self):
+        self.assertIn("about", nt.ACTION_NAMES)
+        self.assertIn('"win.about"', SOURCE)
+        self.assertIn("def show_about(self)", SOURCE)
+
 
 class PackagingTests(unittest.TestCase):
     def test_launcher_exists_and_is_executable(self):
@@ -728,6 +953,52 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Name=Agent Terminal", desktop)
         self.assertIn("Exec=", desktop)
         self.assertIn("Terminal=false", desktop)
+
+
+class ShortcutHintDetectorTests(unittest.TestCase):
+    def test_below_threshold_stays_quiet(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        self.assertFalse(detector.record(1.0))
+        self.assertFalse(detector.record(1.5))
+
+    def test_quick_run_triggers(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertTrue(detector.record(2.0))
+
+    def test_pause_resets_the_count(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertFalse(detector.record(10.0))
+        self.assertFalse(detector.record(10.5))
+        self.assertTrue(detector.record(11.0))
+
+    def test_keeps_firing_while_fumbling_continues(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        self.assertTrue(detector.record(2.0))
+        self.assertTrue(detector.record(2.5))
+
+    def test_reset(self):
+        detector = nt.ShortcutHintDetector(threshold=3, max_gap=3.0)
+        detector.record(1.0)
+        detector.record(1.5)
+        detector.reset()
+        self.assertFalse(detector.record(2.0))
+
+    def test_modifier_keyvals_cover_plain_modifiers(self):
+        for name in ("Shift_L", "Control_R", "Alt_L", "Super_L",
+                     "Caps_Lock"):
+            self.assertIn(name, nt.MODIFIER_KEYVAL_NAMES)
+        self.assertNotIn("a", nt.MODIFIER_KEYVAL_NAMES)
+        self.assertNotIn("Escape", nt.MODIFIER_KEYVAL_NAMES)
+
+    def test_hint_text_names_the_shortcut(self):
+        self.assertIn("Ctrl+Shift+H", nt.SHORTCUT_HINT_TEXT)
+        self.assertIn("Esc", nt.SHORTCUT_HINT_TEXT)
 
 
 if __name__ == "__main__":

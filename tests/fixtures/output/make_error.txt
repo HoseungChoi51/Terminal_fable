@@ -1,0 +1,6 @@
+gcc -c -o main.o main.c
+main.c: In function 'main':
+main.c:10:5: error: 'undeclared_var' undeclared (first use in this function)
+   10 |     undeclared_var = 1;
+      |     ^~~~~~~~~~~~~~
+make: *** [Makefile:4: main.o] Error 1

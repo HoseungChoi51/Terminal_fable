@@ -152,6 +152,15 @@ basic tables, links, inline code, bold, and italics.
   `file`).
 - Find re-renders with highlighted matches and scrolls to them.
 
+Opening a file (or clicking a viewer pane) moves keyboard input to the
+viewer: arrows/PgUp/PgDn/Home/End scroll it, `Ctrl`+`+`/`-`/`0` zoom
+the active pane, and **Esc returns input to the last-used terminal**.
+Both viewers also show a quiet hint at the top of the pane
+(`Esc — back to terminal · Ctrl+Shift+H — shortcut help`) after a few
+quick keystrokes that nothing handled — the usual sign of hunting for
+a forgotten shortcut (e.g. how to close the pane: `Ctrl+Shift+W` while
+it is active). The hint fades out on its own.
+
 ## Image viewer
 
 PNG, JPEG, GIF, and WebP through GdkPixbuf, rendered with

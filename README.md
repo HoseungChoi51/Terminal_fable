@@ -14,10 +14,15 @@ The user-facing guide lives in [`docs/native-terminal-mvp.md`](docs/native-termi
 Full documentation lives in [`docs/`](docs/README.md):
 
 - [Usage guide](docs/native-terminal-mvp.md) — running it, shortcuts, troubleshooting.
+- [Smart ls](docs/smart-ls.md) — the `sls` full-screen directory browser with
+  ls-style keys, smart name truncation, and cd-on-exit.
 - [Architecture](docs/architecture.md) — design, the pure-core / GTK-shell boundary, the layout engine.
 - [Developer guide](docs/developer-guide.md) — setup, tests, conventions, commit/release workflow.
 - [Extending](docs/extending.md) — recipes for adding actions, pane types, palettes, config, and layout ops.
 - [Decisions](docs/decisions/README.md) — ADRs explaining the major design choices.
+- [Copilot development plan](copilot-development-plan.md) — phased roadmap for the
+  context-aware terminal copilot specified in
+  [`AI_Integration_design.md`](AI_Integration_design.md).
 
 ## Requirements
 
@@ -35,6 +40,7 @@ bin/agent-terminal-native
 bin/agent-terminal-native --command "bash -lc 'echo ready; exec bash'"
 bin/agent-terminal-native --markdown README.md
 bin/agent-terminal-native --image path/to/image.png
+bin/sls                    # full-screen directory browser (any terminal)
 ```
 
 The launcher uses system `python3` by default so the system PyGObject
@@ -85,8 +91,14 @@ Alt+Shift+F       temporary focus fit
 Alt+Shift+Space   pane control mode
 Ctrl+Shift+C/V    copy / paste
 Ctrl+Shift+F      find
+Ctrl+Shift+Space  command menu (copilot)
+Ctrl+?            ask mode — chat at the prompt (copilot)
+Ctrl+Shift+M      expand copilot model chain in the status bar
+Ctrl+Shift+S      session history (copilot)
+Alt+Shift+A       pause/resume copilot (active pane)
 F5                reload viewer
 F / 1             image fit / actual size
+Esc               viewer → input back to terminal
 Ctrl+Shift+H, F1  shortcut guide
 ```
 
@@ -125,9 +137,13 @@ python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Vte'
 - `agent_terminal/native_terminal.py` — app entry point, CLI parser,
   pure split-layout engine, Markdown/image helpers, actions and
   shortcuts, control socket, and all GTK/VTE widget classes.
+- `agent_terminal/tui_core.py` — shared pure core for the curses tools:
+  entry model, directory scanning, control-socket client.
 - `agent_terminal/tui_navigation.py` — curses file picker that hands the
   selection back over a Unix control socket.
-- `bin/agent-terminal-native` — launcher.
+- `agent_terminal/smart_ls.py` — `sls`, the full-screen directory
+  browser ([docs/smart-ls.md](docs/smart-ls.md)).
+- `bin/agent-terminal-native`, `bin/sls` — launchers.
 - `tests/` — headless behavioral contracts and source guardrails.
 - `docs/native-terminal-mvp.md` — usage guide and comparison checklist.
 - `packaging/` — user-local install script and desktop entry.

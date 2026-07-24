@@ -15,6 +15,12 @@ exec "${REPO_ROOT}/bin/agent-terminal-native" "\$@"
 WRAPPER
 chmod +x "${BIN_DIR}/agent-terminal-native"
 
+cat > "${BIN_DIR}/sls" <<WRAPPER
+#!/usr/bin/env bash
+exec "${REPO_ROOT}/bin/sls" "\$@"
+WRAPPER
+chmod +x "${BIN_DIR}/sls"
+
 sed "s|^Exec=.*|Exec=${BIN_DIR}/agent-terminal-native|" \
   "${SCRIPT_DIR}/agent-terminal-native.desktop" \
   > "${APP_DIR}/agent-terminal-native.desktop"
@@ -25,3 +31,6 @@ fi
 
 echo "Installed ${BIN_DIR}/agent-terminal-native"
 echo "Installed ${APP_DIR}/agent-terminal-native.desktop"
+echo "Installed ${BIN_DIR}/sls"
+echo "For cd-on-exit, add the shell function from docs/smart-ls.md" \
+     "to your .bashrc."

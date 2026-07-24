@@ -21,17 +21,90 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
+
+from agent_terminal.copilot import config as assistant_config
+from agent_terminal.copilot import journal as copilot_journal
+from agent_terminal.copilot import llm as copilot_llm
+from agent_terminal.copilot import prompt as copilot_prompt
+from agent_terminal.copilot import redact as copilot_redact
+from agent_terminal.copilot import recipes as copilot_recipes
+from agent_terminal.copilot import sessions as copilot_sessions
+from agent_terminal.copilot import shellintegration as copilot_shell
+from agent_terminal.copilot import context as copilot_context
+from agent_terminal.copilot import suggest as copilot_suggest
+from agent_terminal.copilot import titles as copilot_titles
+from agent_terminal.copilot import typo as copilot_typo
+from agent_terminal.copilot import ask as copilot_ask
+from agent_terminal.copilot import episode as copilot_episode
+from agent_terminal.copilot import askcontext as copilot_askcontext
+from agent_terminal.copilot import resume as copilot_resume
+from agent_terminal.copilot import jobs as copilot_jobs
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
 APP_TITLE = "Agent Terminal"
 CONTROL_SOCKET_ENV = "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET"
 CONFIG_PATH = "~/.config/agent-terminal/native.json"
+
+
+@dataclass(frozen=True)
+class BuildInfo:
+    """Which source revision this process is running (for the About box)."""
+    branch: str = "unknown"
+    commit: str = "unknown"
+    dirty: bool = False
+
+    def describe(self) -> str:
+        if self.branch == "unknown" and self.commit == "unknown":
+            return "unknown (not a git checkout)"
+        dirty = " +dirty" if self.dirty else ""
+        return f"{self.branch} @ {self.commit}{dirty}"
+
+
+def resolve_build_info(repo_root=None) -> BuildInfo:
+    """Git branch/commit of the source tree this module was loaded from.
+
+    Best-effort and never raises: outside a git checkout every field falls
+    back to its default, so the About box still opens.
+    """
+    root = repo_root or Path(__file__).resolve().parent.parent
+
+    def git(*args):
+        try:
+            result = subprocess.run(["git", "-C", str(root), *args],
+                                    capture_output=True, text=True,
+                                    timeout=1.5)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    commit = git("rev-parse", "--short", "HEAD")
+    return BuildInfo(branch=branch or "unknown", commit=commit or "unknown",
+                     dirty=bool(git("status", "--porcelain")))
+
+
+_build_info_cache: "BuildInfo | None" = None
+
+
+def build_info() -> BuildInfo:
+    """Resolve build info once, captured at process start (the running code).
+
+    Cached so a later `git checkout` in a pane can't change what the About
+    box reports — it reflects the revision actually loaded, not the current
+    working-tree HEAD.
+    """
+    global _build_info_cache
+    if _build_info_cache is None:
+        _build_info_cache = resolve_build_info()
+    return _build_info_cache
 
 DEPENDENCY_PACKAGES = (
     "python3-gi",
@@ -187,6 +260,8 @@ class NativeConfig:
     pane_close_policy: str = DEFAULT_CLOSE_POLICY
     palette: str = DEFAULT_PALETTE
     pane_tints: bool = True
+    assistant: assistant_config.AssistantConfig = field(
+        default_factory=assistant_config.AssistantConfig)
 
 
 @dataclass(frozen=True)
@@ -218,6 +293,8 @@ def load_native_config(path: str | os.PathLike | None = None) -> NativeConfig:
         pane_close_policy=policy,
         palette=normalize_palette(data.get("palette", DEFAULT_PALETTE)),
         pane_tints=bool(data.get("pane_tints", True)),
+        assistant=assistant_config.parse_assistant_config(
+            data.get("assistant")),
     )
 
 
@@ -1182,7 +1259,10 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "shortcuts", "preferences", "quit",
+    "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
+    "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
+    "pane-eject", "pane-send", "pane-rename", "window-rename", "workspace-name",
+    "shortcuts", "preferences", "about", "quit",
 )
 
 TAB_ACTION_NAMES = tuple(f"tab-{n}" for n in range(1, 10))
@@ -1220,7 +1300,19 @@ ACCELERATORS = {
     "zoom-in": ("<Ctrl>plus", "<Ctrl>equal"),
     "zoom-out": ("<Ctrl>minus",),
     "zoom-reset": ("<Ctrl>0",),
-    "shortcuts": ("<Ctrl><Shift>h", "F1", "<Ctrl>question"),
+    "copilot-menu": ("<Ctrl><Shift>space",),
+    # Ask mode: Ctrl+? (question needs Shift on most layouts); also bind
+    # the raw Ctrl+Shift+/ so it fires regardless of how the layout names
+    # the shifted slash.
+    "copilot-ask": ("<Ctrl>question", "<Ctrl><Shift>slash"),
+    "copilot-model": ("<Ctrl><Shift>m",),
+    "copilot-digest-mode": ("<Ctrl><Shift>d",),
+    "pane-eject": ("<Alt><Shift>e",),
+    "pane-send": ("<Alt><Shift>g",),
+    "pane-rename": ("F2",),
+    "copilot-pause": ("<Alt><Shift>a",),
+    "copilot-sessions": ("<Ctrl><Shift>s",),
+    "shortcuts": ("<Ctrl><Shift>h", "F1"),
     "preferences": ("<Ctrl>comma",),
     "quit": ("<Ctrl><Shift>q",),
 }
@@ -1327,6 +1419,52 @@ class ControlSocketServer:
 
 
 # ---------------------------------------------------------------------------
+# Shortcut hint
+# ---------------------------------------------------------------------------
+
+SHORTCUT_HINT_TEXT = "Esc — back to terminal · Ctrl+Shift+H — shortcut help"
+SHORTCUT_HINT_THRESHOLD = 3
+SHORTCUT_HINT_MAX_GAP = 3.0
+SHORTCUT_HINT_HIDE_SECONDS = 6
+
+# Key presses that are never "typing": bare modifiers and locks.
+MODIFIER_KEYVAL_NAMES = frozenset({
+    "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    "Super_L", "Super_R", "Meta_L", "Meta_R", "Hyper_L", "Hyper_R",
+    "ISO_Level3_Shift", "ISO_Level5_Shift", "Caps_Lock", "Num_Lock",
+})
+
+
+class ShortcutHintDetector:
+    """Guess when dead keystrokes mean "I'm hunting for a shortcut".
+
+    Fed only key presses that nothing in the window handled. A quick
+    run of them reads as someone trying keys from memory; a pause of
+    max_gap seconds reads as having moved on and resets the count.
+    From the threshold on, every further dead key returns True so the
+    hint stays fresh while the fumbling continues.
+    """
+
+    def __init__(self, threshold=SHORTCUT_HINT_THRESHOLD,
+                 max_gap=SHORTCUT_HINT_MAX_GAP):
+        self.threshold = threshold
+        self.max_gap = max_gap
+        self._count = 0
+        self._last = None
+
+    def record(self, timestamp) -> bool:
+        if self._last is not None and timestamp - self._last > self.max_gap:
+            self._count = 0
+        self._last = timestamp
+        self._count += 1
+        return self._count >= self.threshold
+
+    def reset(self):
+        self._count = 0
+        self._last = None
+
+
+# ---------------------------------------------------------------------------
 # GTK loading and native classes
 # ---------------------------------------------------------------------------
 
@@ -1360,7 +1498,76 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .image-status { padding: 4px 10px; }
 .pane-leader { background-color: #1c2128; color: #d8dee9; padding: 18px;
                border-radius: 10px; }
+/* Deliberately quiet: it may be a shortcut hunt or just idle typing. */
+.shortcut-hint { background-color: alpha(#1c2128, 0.85);
+                 color: alpha(#d8dee9, 0.7); font-size: 0.85em;
+                 padding: 2px 12px; border-radius: 0 0 8px 8px; }
+
+/* Completion menu (copilot). */
+.copilot-menu > contents { padding: 4px; }
+.copilot-cmd { font-family: monospace; }
+.copilot-desc { font-size: 0.82em; color: alpha(currentColor, 0.6); }
+.copilot-flash { background-color: alpha(#1c2128, 0.9); color: #d8dee9;
+                 font-size: 0.85em; padding: 3px 14px; border-radius: 8px; }
+/* Inline ghost completion: dim, no background, on the terminal grid. */
+.ghost-text { opacity: 0.42; }
+/* Risk badges, quiet to loud. */
+.risk-badge { font-size: 0.72em; padding: 0 6px; margin-left: 8px;
+              border-radius: 6px; }
+.risk-read-only { background-color: alpha(#5a7d5a, 0.35); }
+.risk-local-change { background-color: alpha(#5a6a8a, 0.4); }
+.risk-install { background-color: alpha(#8a7a3a, 0.45); }
+.risk-remote { background-color: alpha(#8a6a3a, 0.5); }
+.risk-privileged { background-color: alpha(#9a5a3a, 0.55); }
+.risk-destructive { background-color: alpha(#a03a3a, 0.7); color: #fff; }
+.risk-unknown { background-color: alpha(#6a6a6a, 0.4); }
+
+/* In-place ask overlay + shared card styling (copilot). */
+.intent-endpoint { color: alpha(currentColor, 0.55); font-size: 0.8em;
+                   font-family: monospace; }
+.intent-notice { color: alpha(currentColor, 0.7); font-size: 0.88em; }
+.intent-card { background-color: alpha(currentColor, 0.06);
+               border-radius: 8px; padding: 8px 10px; }
+.intent-explain { color: alpha(currentColor, 0.72); font-size: 0.85em; }
+/* Ask bar: an in-window slide-in surface, not a popover. */
+.copilot-ask { padding: 8px 12px;
+               border-top: 2px solid alpha(#6ab0ff, 0.7);
+               background-color: alpha(#6ab0ff, 0.08); }
+.ask-badge { font-weight: bold; font-size: 0.8em; letter-spacing: 0.06em;
+             padding: 1px 8px; border-radius: 6px; color: #0b1626;
+             background-color: alpha(#6ab0ff, 0.9); }
+.ask-seed { font-family: monospace; font-size: 0.82em;
+            color: alpha(currentColor, 0.6); }
+.ask-task { font-size: 0.8em; color: alpha(currentColor, 0.55);
+            font-style: italic; }
+.ask-question { color: alpha(currentColor, 0.85); font-size: 0.9em; }
+/* Persistent copilot status bar along the window bottom. */
+.status-bar { padding: 2px 10px; border-top: 1px solid alpha(currentColor,
+              0.12); background-color: alpha(currentColor, 0.04); }
+.status-bar.ask-active { background-color: alpha(#6ab0ff, 0.16); }
+.status-model { font-size: 0.8em; font-family: monospace;
+                color: alpha(currentColor, 0.7); }
+.status-hint { font-size: 0.78em; color: alpha(currentColor, 0.45); }
+/* Workspace act-then-revert confirmation bar. */
+.workspace-confirm { padding: 6px 12px; background-color: alpha(#6ab0ff, 0.16);
+                     border-top: 1px solid alpha(#6ab0ff, 0.4); }
 """
+
+SESSION_CHECKPOINT_SECONDS = 60
+
+_known_commands_cache = None
+
+
+def known_commands():
+    """Process-wide cache of PATH executable names (for typo correction)."""
+    global _known_commands_cache
+    if _known_commands_cache is None:
+        try:
+            _known_commands_cache = copilot_typo.path_commands()
+        except Exception:
+            _known_commands_cache = frozenset()
+    return _known_commands_cache
+
 
 _pane_ids = itertools.count(1)
 
@@ -1385,6 +1592,36 @@ def load_gtk():
                            Gtk=Gtk, Pango=Pango, Vte=Vte)
 
 
+def _record_output_source(record):
+    """The best already-redacted material to summarize for one command: the
+    heuristic digest (salience-preserving), else the stored output tail."""
+    dg = getattr(record, "digest", None)
+    if dg is not None and not dg.is_empty():
+        return dg.render()
+    return "\n".join(getattr(record, "output_tail", None) or ())
+
+
+def _llm_summarizer(cfg, chain, question):
+    """A `record -> str|None` output summarizer for the "llm" digest mode,
+    caching by command seq so re-asking about the same episode reuses the
+    summary (the on-demand, non-daemon "sidecar"). Returns None to fall back
+    to the heuristic digest."""
+    cache = {}
+
+    def summarize(record):
+        key = getattr(record, "seq", None)
+        if key in cache:
+            return cache[key]
+        source = _record_output_source(record)
+        text = (copilot_llm.digest_output_llm(
+            cfg, command=getattr(record, "cmd", "") or "", output=source,
+            question=question, chain=chain) if source.strip() else None)
+        cache[key] = text
+        return text
+
+    return summarize
+
+
 _NATIVE_CLASSES = None
 
 
@@ -1397,6 +1634,15 @@ def build_native_classes(g):
     Gdk, GdkPixbuf, Gio, GLib = g.Gdk, g.GdkPixbuf, g.Gio, g.GLib
     Graphene, Gsk = g.Graphene, g.Gsk
     Gtk, Pango, Vte = g.Gtk, g.Pango, g.Vte
+
+    # The shell snippet reports commands through this custom termprop;
+    # registration is process-global and must precede terminal creation.
+    try:
+        Vte.install_termprop(copilot_journal.COMMAND_TERMPROP,
+                             Vte.PropertyType.STRING,
+                             Vte.PropertyFlags.NONE)
+    except Exception:
+        pass
 
     def rgba(value):
         color = Gdk.RGBA()
@@ -1484,17 +1730,71 @@ def build_native_classes(g):
         def zoom_reset(self):
             pass
 
+        def show_shortcut_hint(self):
+            pass
+
+        def insert_text(self, text):
+            pass
+
+        def dispose(self):
+            pass
+
+    class ShortcutHintMixin:
+        """Quiet top-of-pane notice pointing at the shortcut guide."""
+
+        def _wrap_with_hint(self, content):
+            label = Gtk.Label(label=SHORTCUT_HINT_TEXT)
+            label.add_css_class("shortcut-hint")
+            self._hint_revealer = Gtk.Revealer()
+            self._hint_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.CROSSFADE)
+            self._hint_revealer.set_halign(Gtk.Align.CENTER)
+            self._hint_revealer.set_valign(Gtk.Align.START)
+            self._hint_revealer.set_can_target(False)
+            self._hint_revealer.set_child(label)
+            self._hint_timeout = None
+            overlay = Gtk.Overlay()
+            overlay.set_child(content)
+            overlay.add_overlay(self._hint_revealer)
+            return overlay
+
+        def show_shortcut_hint(self):
+            self._hint_revealer.set_reveal_child(True)
+            if self._hint_timeout is not None:
+                GLib.source_remove(self._hint_timeout)
+            self._hint_timeout = GLib.timeout_add_seconds(
+                SHORTCUT_HINT_HIDE_SECONDS, self._hide_shortcut_hint)
+
+        def _hide_shortcut_hint(self):
+            self._hint_timeout = None
+            self._hint_revealer.set_reveal_child(False)
+            return GLib.SOURCE_REMOVE
+
     class TerminalPane(PaneBase):
         kind = "terminal"
 
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
-                     extra_env=None, on_exited=None, title=None, tint=0):
+                     extra_env=None, on_exited=None, title=None, tint=0,
+                     assistant=None):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
             self.settings = settings
             self.tint = normalize_tint(tint)
+            self.assistant = assistant
+            self.pid = None
+            self._name_override = None   # manual/LLM pane name; wins over auto
+            self.journal = None
+            self._termprop_events = []
+            self._flush_id = None
+            self._pending_title = None
+            self._title_policy = None
+            self._tracker = None
+            self._ghost_label = None
+            self._ghost_suffix = ""
+            self._ghost_dismissed = False
+            self._correction_popover = None
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
@@ -1504,11 +1804,36 @@ def build_native_classes(g):
                                       self._on_title_signal)
             except TypeError:
                 pass
+            if assistant is not None and assistant.enabled:
+                self.journal = copilot_journal.PaneJournal(assistant.journal)
+                try:
+                    self.terminal.connect("termprop-changed",
+                                          self._on_termprop)
+                except TypeError:
+                    self.journal = None
+                if self.journal is not None and assistant.titles.enabled:
+                    self._title_policy = copilot_titles.TitlePolicy(
+                        assistant.titles.min_interval_s)
+                if self.journal is not None:
+                    # The tracker runs whenever we journal (it feeds both
+                    # ghost text and the menu's typed-line awareness); only
+                    # the visible overlay is gated on ghost_text.
+                    self._tracker = copilot_prompt.PromptTracker()
+                    self.terminal.connect("commit", self._on_commit)
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
+            # VTE consumes wheel events itself, so GTK's overlay scrollbar
+            # never gets revealed; use a permanent scrollbar instead. ALWAYS
+            # (not AUTOMATIC) keeps the column count stable as scrollback
+            # fills.
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
+            scroller.set_overlay_scrolling(False)
             scroller.set_hexpand(True)
             scroller.set_vexpand(True)
             self.widget = scroller
+            if (self._tracker is not None
+                    and assistant.suggestions.ghost_text):
+                self.widget = self._build_ghost_overlay(scroller, settings)
             self._spawn(command, working_directory, control_socket_path,
                         extra_env)
 
@@ -1625,6 +1950,11 @@ def build_native_classes(g):
                 env[CONTROL_SOCKET_ENV] = control_socket_path
             if extra_env:
                 env.update(extra_env)
+            # Shell-integration rcfile injection; fails open to the
+            # original argv (see copilot/shellintegration.py).
+            argv = copilot_shell.wrap_argv(
+                argv, env, self.assistant,
+                explicit_command=command is not None)
             envv = [f"{key}={value}" for key, value in env.items()]
             cwd = working_directory or os.getcwd()
             try:
@@ -1639,6 +1969,7 @@ def build_native_classes(g):
                     self._on_spawned, None)
 
         def _on_spawned(self, terminal, pid, error, *user_data):
+            self.pid = pid if error is None else None
             if error is not None:
                 self._feed_message(f"spawn failed: {error}")
 
@@ -1669,6 +2000,291 @@ def build_native_classes(g):
                 pass
             return None
 
+        # -- command journal (copilot P0) --------------------------------
+
+        def _on_termprop(self, terminal, name):
+            """Collect one termprop event; flush the burst from idle.
+
+            VTE coalesces an output burst into one batch whose signal
+            order is not the emission order, so events are gathered
+            here and handed to the journal in one apply_batch call.
+            """
+            if self.journal is None:
+                return
+            if name == copilot_journal.POSTEXEC:
+                try:
+                    ok, value = terminal.get_termprop_uint(name)
+                except Exception:
+                    ok, value = False, None
+                value = int(value) if ok else None
+            elif name == copilot_journal.COMMAND_TERMPROP:
+                try:
+                    result = terminal.get_termprop_string(name)
+                except Exception:
+                    result = None
+                value = result[0] if result else None
+            elif name in (copilot_journal.PRECMD, copilot_journal.PREEXEC):
+                value = None
+            else:
+                return
+            self._termprop_events.append((name, value))
+            self._schedule_flush()
+
+        def _schedule_flush(self):
+            if self._flush_id is None:
+                self._flush_id = GLib.idle_add(self._flush_pending)
+
+        def _flush_pending(self):
+            self._flush_id = None
+            events, self._termprop_events = self._termprop_events, []
+            if self.journal is not None and events:
+                try:
+                    row = self.terminal.get_cursor_position()[1]
+                except Exception:
+                    row = None
+                before = len(self.journal.records)
+                self.journal.apply_batch(
+                    events, timestamp=time.monotonic(),
+                    wall_time=time.time(), cwd=self.current_directory(),
+                    cursor_row=row, read_rows=self._read_rows)
+                if len(self.journal.records) != before:
+                    self._maybe_update_title()
+                    self._maybe_show_correction()
+                if self._tracker is not None:
+                    names = [name for name, _ in events]
+                    if copilot_journal.PREEXEC in names:
+                        self._tracker.on_preexec()
+                    if copilot_journal.PRECMD in names:
+                        self._tracker.on_precmd()
+                    self._ghost_dismissed = False
+                    self._refresh_ghost()
+            # Resolve a deferred title now that journal state is current
+            # (see _on_title_signal): a title set while a command runs is
+            # a program title and wins; one set at the prompt is shell
+            # boilerplate and is ignored so the inferred title stands.
+            if self._pending_title is not None:
+                title, self._pending_title = self._pending_title, None
+                if (title and self._name_override is None
+                        and self.journal is not None
+                        and self.journal.state == "executing"):
+                    self.title = title
+                    self._notify_title()
+            return GLib.SOURCE_REMOVE
+
+        def _read_rows(self, start_row, end_row):
+            try:
+                text = self.terminal.get_text_range_format(
+                    Vte.Format.TEXT, start_row, 0, end_row, 0)
+            except Exception:
+                return None
+            if not text or not text[0]:
+                return None
+            return text[0].rstrip("\n").split("\n")
+
+        def insert_text(self, text):
+            """Type text into the child without running it (no newline)."""
+            if not text:
+                return
+            data = text.encode("utf-8")
+            try:
+                self.terminal.feed_child(data)
+            except TypeError:
+                try:
+                    self.terminal.feed_child(data, len(data))
+                except Exception:
+                    pass
+            except Exception:
+                # The pane may have been disposed (e.g. its tab/pane closed
+                # while an ask bar over it was still open); a best-effort
+                # feed must never crash the app.
+                pass
+
+        # -- "did you mean" correction chip (copilot P3) -----------------
+
+        def _maybe_show_correction(self):
+            if (self.assistant is None
+                    or not self.assistant.suggestions.typo_correction):
+                return
+            record = self.journal.last_record()
+            if record is None or record.exit_code != 127 or not record.cmd:
+                return
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            correction = copilot_typo.correct_command(
+                record.cmd, known=known_commands(), history=history)
+            # A fix that introduces real danger stays out of one-click
+            # paths (design doc 5.5) — offer it only in the menu.
+            if (correction is None or correction.reason != "command"
+                    or correction.escalates_risk):
+                return
+            self._show_correction_chip(correction.corrected)
+
+        def _show_correction_chip(self, corrected):
+            if getattr(self, "_correction_popover", None) is not None:
+                self._correction_popover.popdown()
+            popover = Gtk.Popover()
+            self._correction_popover = popover
+            popover.set_parent(self.terminal)
+            popover.set_autohide(False)
+            popover.set_position(Gtk.PositionType.TOP)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.add_css_class("copilot-flash")
+            box.append(Gtk.Label(label="Did you mean"))
+            cmd = Gtk.Label(label=corrected)
+            cmd.add_css_class("copilot-cmd")
+            box.append(cmd)
+            insert = Gtk.Button(label="Insert")
+            insert.add_css_class("chip-button")
+            box.append(insert)
+            popover.set_child(box)
+
+            def dismiss():
+                if getattr(self, "_correction_popover", None) is popover:
+                    self._correction_popover = None
+                popover.popdown()
+                popover.unparent()
+                return GLib.SOURCE_REMOVE
+
+            def on_insert(_button):
+                self.insert_text(corrected)
+                self.terminal.grab_focus()
+                dismiss()
+
+            insert.connect("clicked", on_insert)
+            popover.popup()
+            GLib.timeout_add_seconds(8, dismiss)
+
+        # -- ghost text (copilot P4) -------------------------------------
+
+        def _build_ghost_overlay(self, scroller, settings):
+            """Wrap the terminal so a dim completion can float at the cursor."""
+            label = Gtk.Label()
+            label.set_halign(Gtk.Align.START)
+            label.set_valign(Gtk.Align.START)
+            label.set_can_target(False)
+            label.set_visible(False)
+            label.add_css_class("ghost-text")
+            attrs = Pango.AttrList()
+            font = Pango.FontDescription()
+            font.set_family(settings.font_family)
+            font.set_size(int(clamp_font_size(settings.font_size)
+                              * Pango.SCALE))
+            attrs.insert(Pango.attr_font_desc_new(font))
+            label.set_attributes(attrs)
+            self._ghost_label = label
+            overlay = Gtk.Overlay()
+            overlay.set_child(scroller)
+            overlay.add_overlay(label)
+            self.terminal.connect("contents-changed",
+                                  lambda *_: self._refresh_ghost())
+            focus = Gtk.EventControllerFocus()
+            focus.connect("leave", lambda *_: self._hide_ghost())
+            self.terminal.add_controller(focus)
+            self.terminal.get_vadjustment().connect(
+                "value-changed", lambda *_: self._hide_ghost())
+            keys = Gtk.EventControllerKey()
+            keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            keys.connect("key-pressed", self._on_ghost_key)
+            self.terminal.add_controller(keys)
+            return overlay
+
+        def _on_commit(self, terminal, text, size):
+            if self._tracker is None:
+                return
+            self._ghost_dismissed = False
+            self._tracker.on_commit(text)
+            self._refresh_ghost()
+
+        def _ghost_visible(self):
+            return (self._ghost_label is not None
+                    and self._ghost_label.get_visible())
+
+        def _hide_ghost(self):
+            # Just hide the overlay — do NOT touch tracker state. The
+            # screen cross-check in _refresh_ghost is what guards against
+            # drift; the tracker only goes DIRTY on genuinely off-model
+            # input (control chars, handled in PromptTracker.on_commit).
+            if self._ghost_label is not None and self._ghost_label.get_visible():
+                self._ghost_label.set_visible(False)
+            self._ghost_suffix = ""
+
+        def _refresh_ghost(self):
+            label = self._ghost_label
+            if label is None or self._ghost_dismissed:
+                return
+            typed = self._tracker.typed_prefix()
+            if not typed:
+                if label.get_visible():
+                    label.set_visible(False)
+                self._ghost_suffix = ""
+                return
+            # Cross-check the tracker against the real screen: the current
+            # row up to the cursor must actually end with what we think was
+            # typed, or we have drifted and must not guess.
+            col, row = self.terminal.get_cursor_position()
+            line = self._read_rows(row, row + 1)
+            visible = line[0][:col] if line else ""
+            if not visible.endswith(typed):
+                self._hide_ghost()
+                return
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            suffix = copilot_suggest.ghost_completion(
+                typed, history=history,
+                min_confidence=self.assistant.suggestions.min_confidence)
+            if not suffix:
+                if label.get_visible():
+                    label.set_visible(False)
+                self._ghost_suffix = ""
+                return
+            self._ghost_suffix = suffix
+            label.set_text(suffix)
+            self._position_ghost(col, row)
+            label.set_visible(True)
+
+        def _position_ghost(self, col, row):
+            try:
+                cw = self.terminal.get_char_width()
+                ch = self.terminal.get_char_height()
+                top = self.terminal.get_vadjustment().get_value()
+            except Exception:
+                return
+            self._ghost_label.set_margin_start(int(col * cw))
+            self._ghost_label.set_margin_top(int((row - top) * ch))
+
+        def _on_ghost_key(self, controller, keyval, keycode, state):
+            if not self._ghost_visible():
+                return False
+            name = Gdk.keyval_name(keyval) or ""
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if name == "Escape":
+                self._ghost_dismissed = True
+                self._hide_ghost()
+                return True
+            if name == "Right" and (ctrl or not (state & (
+                    Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK))):
+                self._accept_ghost()
+                return True
+            return False
+
+        def _accept_ghost(self):
+            suffix = self._ghost_suffix
+            if not suffix:
+                return
+            self._ghost_label.set_visible(False)
+            self._ghost_suffix = ""
+            # feed_child fires the "commit" signal, so the tracker absorbs
+            # the accepted suffix through _on_commit — no manual accept().
+            self.insert_text(suffix)
+
+        def build_session(self, config, now):
+            """Build a storable session from this pane's journal, or None."""
+            if self.journal is None:
+                return None
+            records = self.journal.snapshot()
+            if not records:
+                return None
+            return copilot_sessions.build_session(
+                records, config=config, now=now)
+
         def _feed_message(self, message):
             data = f"\r\n[{message}]\r\n".encode("utf-8")
             try:
@@ -1684,8 +2300,40 @@ def build_native_classes(g):
                 self.on_exited(self)
 
         def _on_title_signal(self, terminal):
-            self.title = terminal.get_window_title() or "Terminal"
+            vte_title = terminal.get_window_title() or ""
+            if self._title_policy is not None:
+                # The copilot owns the tab title. Defer the decision to
+                # the idle flush so it sees the journal state *after* the
+                # accompanying precmd batch is applied — resolving it here
+                # would race that batch and misread prompt boilerplate as
+                # a program title. Resolution lives in _flush_pending.
+                self._pending_title = vte_title
+                self._schedule_flush()
+                return
+            if self._name_override is not None:
+                return
+            self.title = vte_title or "Terminal"
             self._notify_title()
+
+        def rename(self, name):
+            """Give this pane a manual/LLM name that overrides the inferred
+            title (empty clears it, restoring the automatic title)."""
+            name = (name or "").strip()
+            self._name_override = name or None
+            if name:
+                self.title = name
+            self._notify_title()
+
+        def _maybe_update_title(self):
+            if self._name_override is not None:
+                return
+            if self._title_policy is None or self.journal is None:
+                return
+            candidate = copilot_titles.infer_title(
+                self.journal.snapshot(), self.current_directory())
+            if self._title_policy.propose(candidate, time.monotonic()):
+                self.title = self._title_policy.current
+                self._notify_title()
 
         def apply_tint(self):
             """Set VTE colours, overriding only the background for this pane."""
@@ -1753,7 +2401,7 @@ def build_native_classes(g):
         def zoom_reset(self):
             self.terminal.set_font_scale(1.0)
 
-    class MarkdownPane(PaneBase):
+    class MarkdownPane(ShortcutHintMixin, PaneBase):
         """Passive native Markdown viewer rendered with GTK labels."""
 
         kind = "markdown"
@@ -1771,7 +2419,7 @@ def build_native_classes(g):
             self._scroller = Gtk.ScrolledWindow()
             self._scroller.set_hexpand(True)
             self._scroller.set_vexpand(True)
-            self.widget = self._scroller
+            self.widget = self._wrap_with_hint(self._scroller)
             click = Gtk.GestureClick()
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pressed)
@@ -1781,6 +2429,11 @@ def build_native_classes(g):
         def _on_pressed(self, *args):
             if self.on_activated:
                 self.on_activated(self)
+
+        def focus(self):
+            # The focusable widget is the scroller (arrow/page keys
+            # scroll it), not the overlay wrapper.
+            self._scroller.grab_focus()
 
         def reload(self):
             try:
@@ -1957,7 +2610,7 @@ def build_native_classes(g):
             self._zoom = 1.0
             self.reload()
 
-    class ImagePane(PaneBase):
+    class ImagePane(ShortcutHintMixin, PaneBase):
         """Native image viewer: GdkPixbuf loading with Gtk.Picture output."""
 
         kind = "image"
@@ -1985,7 +2638,7 @@ def build_native_classes(g):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             box.append(self._scroller)
             box.append(self._status)
-            self.widget = box
+            self.widget = self._wrap_with_hint(box)
             click = Gtk.GestureClick()
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pressed)
@@ -2006,6 +2659,9 @@ def build_native_classes(g):
         def _on_pressed(self, *args):
             if self.on_activated:
                 self.on_activated(self)
+
+        def focus(self):
+            self._scroller.grab_focus()
 
         def reload(self):
             try:
@@ -2228,12 +2884,15 @@ def build_native_classes(g):
             self.fit_focused_root = None
             self.undo_stack = []
             self.redo_stack = []
+            self._recent_terminal_id = None
             self.container = PaneLayoutContainer(self)
             self.widget = self.container.widget
             self.title = first_pane.title
             self._attach_pane(first_pane)
             self.root = layout_leaf(first_pane.pane_id)
             self.active_pane_id = first_pane.pane_id
+            if first_pane.kind == "terminal":
+                self._recent_terminal_id = first_pane.pane_id
             self._sync()
 
         def display_root(self):
@@ -2254,9 +2913,58 @@ def build_native_classes(g):
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pane_pressed, pane.pane_id)
             pane.widget.add_controller(click)
+            # Kept so a live move to another tab can drop this tab's click
+            # handler before the target tab installs its own.
+            pane._tab_click = click
+
+        def detach_pane(self, pane_id):
+            """Remove a pane from this tab WITHOUT disposing it, for a live
+            move to another window. Returns the pane (or None). The child
+            process and scrollback are untouched — only the widget is
+            unparented and the tab's layout/bookkeeping updated."""
+            pane = self.panes.get(pane_id)
+            if pane is None:
+                return None
+            controller = getattr(pane, "_tab_click", None)
+            if controller is not None:
+                try:
+                    pane.widget.remove_controller(controller)
+                except Exception:
+                    pass
+                pane._tab_click = None
+            pane.on_title_changed = None
+            self.panes.pop(pane_id, None)
+            self.push_history()
+            self.fit_focused_root = None
+            self.root = layout_remove_leaf(self.root, pane_id,
+                                           self.window.close_policy)
+            self.container.remove_pane(pane_id)
+            self._prune_history()
+            if self.root is None:
+                # emptied the tab -> drop it (may close an emptied window)
+                self.window.remove_tab(self)
+                return pane
+            if self.active_pane_id not in self.panes:
+                ids = layout_leaf_ids(self.root)
+                if ids:
+                    self.set_active(ids[0])
+            self._sync()
+            return pane
+
+        def adopt_pane(self, pane, orientation=HORIZONTAL):
+            """Take in a pane detached from another tab, splitting the active
+            pane. Rebinds the pane's window-scoped callback so exit/close route
+            to this window."""
+            pane.on_exited = self.window._on_pane_exited
+            self.add_pane(pane, orientation)
 
         def _on_pane_pressed(self, gesture, n_press, x, y, pane_id):
-            self.set_active(pane_id)
+            # Viewers take keyboard focus on click so scroll/zoom keys
+            # (and Escape back to the terminal) work mouse-free;
+            # terminals keep VTE's own click-to-focus.
+            pane = self.panes.get(pane_id)
+            focus = pane is not None and pane.kind != "terminal"
+            self.set_active(pane_id, focus=focus)
 
         def _on_pane_title(self, pane):
             if pane.pane_id == self.active_pane_id:
@@ -2267,10 +2975,24 @@ def build_native_classes(g):
             if pane_id not in self.panes:
                 return
             self.active_pane_id = pane_id
+            if self.panes[pane_id].kind == "terminal":
+                self._recent_terminal_id = pane_id
             self.title = self.panes[pane_id].title
             self.window.update_tab_title(self)
             if focus:
                 self.panes[pane_id].focus()
+
+        def focus_recent_terminal(self):
+            """Return keyboard input to the last-used terminal pane."""
+            pane = self.panes.get(self._recent_terminal_id)
+            if pane is None or pane.kind != "terminal":
+                pane = next((self.panes[pane_id]
+                             for pane_id in layout_leaf_ids(self.root)
+                             if pane_id in self.panes
+                             and self.panes[pane_id].kind == "terminal"),
+                            None)
+            if pane is not None:
+                self.set_active(pane.pane_id, focus=True)
 
         def _sync(self):
             self.container.set_panes(
@@ -2301,7 +3023,9 @@ def build_native_classes(g):
                                               after=True)
             self.set_active(pane.pane_id)
             self._sync()
-            pane.focus()
+            # Deferred: grab_focus on a not-yet-mapped widget is a no-op,
+            # and the new pane only gets allocated on the next frame.
+            GLib.idle_add(pane.focus)
 
         def split(self, orientation):
             self.add_pane(self.window.create_terminal_pane(), orientation)
@@ -2311,6 +3035,8 @@ def build_native_classes(g):
             pane = self.panes.pop(pane_id, None)
             if pane is None:
                 return
+            self.window.flush_pane_session(pane)
+            pane.dispose()
             self.push_history()
             self.fit_focused_root = None
             self.root = layout_remove_leaf(self.root, pane_id,
@@ -2444,6 +3170,7 @@ def build_native_classes(g):
 
         def dispose(self):
             for pane_id in list(self.panes):
+                self.panes[pane_id].dispose()
                 self.container.remove_pane(pane_id)
             self.panes.clear()
 
@@ -2575,6 +3302,18 @@ def build_native_classes(g):
             self.set_default_size(1100, 700)
             self._app = app
             self.options = options
+            build_info()   # capture the running revision at startup (About box)
+            # Copilot ask-bar + status-bar state (set before _build_body,
+            # which builds the status bar).
+            self._ask_token = None       # identity of the open ask session
+            self._ask_close = None       # teardown closure for the open bar
+            self._copilot_chain_cache = None
+            self._pinned_model = None     # model chosen via the picker
+            self._digest_mode_override = None  # A/B toggle over llm.digest_mode
+            self._model_dialog = None
+            self._sessions_dialog = None
+            self._revert_token = None          # identity of the open revert bar
+            self._window_name = None           # manual/LLM window name
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -2583,7 +3322,32 @@ def build_native_classes(g):
             self._build_header()
             self._build_body()
             self._install_actions()
+            self._hint_detector = ShortcutHintDetector()
+            self._hint_pane_id = None
+            dead_keys = Gtk.EventControllerKey()
+            dead_keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            dead_keys.connect("key-pressed", self._on_dead_key)
+            self.add_controller(dead_keys)
+            self._completion_popover = None
+            self._summary_dialog = None
+            self._resume_prompted = False
+            self._session_checkpoint_id = None
+            assistant = options.native_config.assistant
+            if (self._app.session_store is not None
+                    or (assistant.enabled and assistant.resume.enabled)):
+                # Periodic tick: checkpoint sessions (crash safety) and
+                # offer a resume summary once the pane has gone idle.
+                self._session_checkpoint_id = GLib.timeout_add_seconds(
+                    SESSION_CHECKPOINT_SECONDS, self._session_tick)
+                self.connect("close-request", self._on_close_request)
             self._open_initial_tabs()
+
+        def _on_close_request(self, *args):
+            self.flush_all_sessions()
+            if self._session_checkpoint_id is not None:
+                GLib.source_remove(self._session_checkpoint_id)
+                self._session_checkpoint_id = None
+            return False
 
         def _build_header(self):
             header = Gtk.HeaderBar()
@@ -2608,10 +3372,23 @@ def build_native_classes(g):
             view.append("Clear Scrollback", "win.clear-scrollback")
             view.append("Reload Pane", "win.reload-pane")
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
+            view.append("Command Menu…", "win.copilot-menu")
+            view.append("Ask Copilot…", "win.copilot-ask")
+            view.append("Rename Pane…", "win.pane-rename")
+            view.append("Rename Window…", "win.window-rename")
+            view.append("Name Workspace (AI)…", "win.workspace-name")
+            view.append("Eject Pane to New Window", "win.pane-eject")
+            view.append("Send Pane to Window…", "win.pane-send")
+            view.append("Copilot Model", "win.copilot-model")
+            view.append("Toggle Context Mode", "win.copilot-digest-mode")
+            view.append("Session Summary…", "win.copilot-summary")
+            view.append("Session History…", "win.copilot-sessions")
+            view.append("Copilot Journal (Debug)", "win.copilot-debug")
             menu.append_section(None, view)
             meta = Gio.Menu()
             meta.append("Keyboard Shortcuts", "win.shortcuts")
             meta.append("Preferences", "win.preferences")
+            meta.append("About", "win.about")
             meta.append("Quit", "app.quit")
             menu.append_section(None, meta)
             button = Gtk.MenuButton()
@@ -2633,9 +3410,222 @@ def build_native_classes(g):
             self.notebook = Gtk.Notebook()
             self.notebook.set_scrollable(True)
             self.notebook.connect("switch-page", self._on_switch_page)
+            # Ask mode lives in this in-window revealer (never a modal
+            # popover), above a persistent copilot status bar.
+            self._ask_revealer = Gtk.Revealer()
+            self._ask_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.SLIDE_UP)
+            self._ask_revealer.set_reveal_child(False)
+            # A workspace rearrange (job restore / gather) confirms with a
+            # revert bar in this revealer — act first, offer undo (like a
+            # display-resolution change).
+            self._workspace_revealer = Gtk.Revealer()
+            self._workspace_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.SLIDE_UP)
+            self._workspace_revealer.set_reveal_child(False)
             box.append(self.search_bar)
             box.append(self.notebook)
+            box.append(self._ask_revealer)
+            box.append(self._workspace_revealer)
+            box.append(self._build_status_bar())
             self.set_child(box)
+
+        def _resolve_copilot_chain(self):
+            """(chain, eligible) for the copilot; endpoints cached, the chosen
+            model applied fresh so a pick takes effect immediately."""
+            cache = getattr(self, "_copilot_chain_cache", None)
+            if cache is None:
+                llm_cfg = self.options.native_config.assistant.llm
+                chain = copilot_llm.resolve_chain(llm_cfg)
+                cache = (chain, copilot_llm.eligible_endpoints(
+                    chain, llm_cfg.allow_remote_context))
+                self._copilot_chain_cache = cache
+            chain, eligible = cache
+            pinned = getattr(self, "_pinned_model", None)
+            if pinned and eligible:
+                # Pin the chosen model on the primary usable endpoint.
+                primary = eligible[0].with_(model=pinned)
+                chain = [primary if e is eligible[0] else e for e in chain]
+                eligible = [primary, *eligible[1:]]
+            return chain, eligible
+
+        def _copilot_status_text(self, expand=False):
+            """Status-bar text: the attached model, abbreviated or full."""
+            assistant = self.options.native_config.assistant
+            if not assistant.enabled or not assistant.ask.enabled:
+                return "copilot: off"
+            chain, eligible = self._resolve_copilot_chain()
+            if not chain:
+                return "copilot: no model"
+            if expand:
+                return "copilot: " + copilot_llm.chain_label(
+                    chain, assistant.llm.allow_remote_context)
+            if not eligible:
+                return "copilot: cloud only (gated)"
+            # Abbreviated: the chosen model, else the primary endpoint's
+            # first word (e.g. "centinel"). A live A/B context override is
+            # appended so the active mode is always visible.
+            primary = eligible[0]
+            override = getattr(self, "_digest_mode_override", None)
+            suffix = f"  ·  ctx:{override}" if override else ""
+            return "copilot: " + (primary.model
+                                  or (primary.label.split() or ["?"])[0]) + suffix
+
+        def _build_status_bar(self):
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            bar.add_css_class("status-bar")
+            self._status_model = Gtk.Label(
+                label="⌁ " + self._copilot_status_text())
+            self._status_model.set_xalign(0.0)
+            self._status_model.set_hexpand(True)
+            self._status_model.set_ellipsize(Pango.EllipsizeMode.END)
+            self._status_model.set_selectable(True)
+            self._status_model.set_selectable(False)
+            self._status_model.add_css_class("status-model")
+            self._status_model.set_tooltip_text(
+                "Copilot model — click or Ctrl+Shift+M to choose")
+            click = Gtk.GestureClick()
+            click.connect("pressed",
+                          lambda *_: self.show_model_picker())
+            self._status_model.add_controller(click)
+            hint = Gtk.Label(label="Ctrl+?  ask")
+            hint.add_css_class("status-hint")
+            bar.append(self._status_model)
+            bar.append(hint)
+            self._status_bar = bar
+            return bar
+
+        def _refresh_status(self):
+            """Repaint the status bar (model text + ask-active highlight)."""
+            model = getattr(self, "_status_model", None)
+            if model is None:
+                return
+            model.set_text("⌁ " + self._copilot_status_text())
+            active = getattr(self, "_ask_token", None) is not None
+            setter = (self._status_bar.add_css_class if active
+                      else self._status_bar.remove_css_class)
+            setter("ask-active")
+
+        def show_model_picker(self):
+            """Dialog to choose which model the copilot uses (Ctrl+Shift+M).
+
+            Lists the models the primary endpoint advertises (discovered on a
+            worker thread); picking one pins it for the session. A dialog
+            (not a popover) so it survives the async discovery cleanly.
+            """
+            llm_cfg = self.options.native_config.assistant.llm
+            chain, eligible = self._resolve_copilot_chain()
+            dialog = Gtk.Window()
+            self._model_dialog = dialog
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Copilot Model")
+            dialog.set_default_size(400, 340)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(14)
+            box.set_margin_bottom(14)
+            box.set_margin_start(14)
+            box.set_margin_end(14)
+            chain_lbl = Gtk.Label(label=copilot_llm.chain_label(
+                chain, llm_cfg.allow_remote_context))
+            chain_lbl.set_xalign(0.0)
+            chain_lbl.set_wrap(True)
+            chain_lbl.add_css_class("intent-endpoint")
+            box.append(chain_lbl)
+            close_button = Gtk.Button(label="Close")
+            close_button.connect("clicked", lambda *_: dialog.close())
+
+            def alive():
+                return dialog.get_visible()
+
+            def choose(model):
+                self._pinned_model = model
+                self._refresh_status()
+                dialog.close()
+
+            if not eligible:
+                note = Gtk.Label(label="No usable model — check auth.json or "
+                                 "enable assistant.llm.allow_remote_context.")
+                note.set_wrap(True)
+                note.set_xalign(0.0)
+                note.add_css_class("intent-notice")
+                box.append(note)
+                box.append(close_button)
+                dialog.set_child(box)
+                self._close_on_escape(dialog)
+                dialog.present()
+                return
+
+            primary = eligible[0]
+            current = primary.model
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                               Gtk.PolicyType.AUTOMATIC)
+            scroller.set_child(listbox)
+            spinner = Gtk.Spinner()
+            spinner.start()
+            box.append(spinner)
+            box.append(scroller)
+            box.append(close_button)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+
+            def add_row(text, model, is_current):
+                row = Gtk.ListBoxRow()
+                lbl = Gtk.Label(label=("●  " if is_current else "    ") + text)
+                lbl.set_xalign(0.0)
+                lbl.add_css_class("copilot-cmd")
+                row.set_child(lbl)
+                row._model = model
+                listbox.append(row)
+
+            listbox.connect("row-activated",
+                            lambda _b, row: choose(getattr(row, "_model",
+                                                           None)))
+
+            def show_models(models):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                for name in models:
+                    add_row(f"{name}   (on {primary.label})", name,
+                            name == current)
+                if not models:
+                    add_row("(no models advertised)", current, True)
+                return GLib.SOURCE_REMOVE
+
+            def show_error(message):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                err = Gtk.Label(label=f"Couldn't list models: {message}\n"
+                                "Type a model name to use it:")
+                err.set_wrap(True)
+                err.set_xalign(0.0)
+                err.add_css_class("intent-notice")
+                entry = Gtk.Entry()
+                entry.set_placeholder_text("model name…")
+                if current:
+                    entry.set_text(current)
+                entry.connect("activate",
+                              lambda e: choose(e.get_text().strip() or None))
+                box.insert_child_after(err, spinner)
+                box.insert_child_after(entry, err)
+                entry.grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def work():
+                try:
+                    models = copilot_llm.list_models(llm_cfg, primary)
+                    GLib.idle_add(show_models, models)
+                except copilot_llm.LlmError as exc:
+                    GLib.idle_add(show_error, str(exc))
+
+            threading.Thread(target=work, daemon=True).start()
+            dialog.present()
 
         def _install_actions(self):
             for name in ACTION_NAMES + TAB_ACTION_NAMES:
@@ -2661,7 +3651,8 @@ def build_native_classes(g):
         # -- pane factories -------------------------------------------------
 
         def create_terminal_pane(self, command=None, working_directory=None,
-                                 hold_on_exit=False, title=None):
+                                 hold_on_exit=False, title=None,
+                                 extra_env=None):
             return TerminalPane(
                 self.options.settings, command=command,
                 working_directory=(working_directory
@@ -2669,7 +3660,9 @@ def build_native_classes(g):
                 hold_on_exit=hold_on_exit,
                 control_socket_path=self._app.control_socket_path,
                 on_exited=self._on_pane_exited, title=title,
-                tint=self._next_tint_slot())
+                tint=self._next_tint_slot(),
+                extra_env=extra_env,
+                assistant=self.options.native_config.assistant)
 
         def _next_tint_slot(self):
             """Rotate through the tint ring so adjacent panes differ."""
@@ -2704,10 +3697,13 @@ def build_native_classes(g):
         # -- tabs -----------------------------------------------------------
 
         def add_terminal_tab(self, command=None, working_directory=None,
-                             hold_on_exit=False, title=None):
+                             hold_on_exit=False, title=None, extra_env=None):
             pane = self.create_terminal_pane(command, working_directory,
-                                             hold_on_exit, title)
-            self._append_tab(TerminalTab(self, pane))
+                                             hold_on_exit, title,
+                                             extra_env=extra_env)
+            tab = TerminalTab(self, pane)
+            self._append_tab(tab)
+            return tab
 
         def open_path_in_new_tab(self, path):
             self._append_tab(TerminalTab(self, self.create_viewer_pane(path)))
@@ -2727,7 +3723,17 @@ def build_native_classes(g):
             if isinstance(label, Gtk.Label):
                 label.set_text(tab.title or "Terminal")
             if tab is self.active_tab():
-                self.set_title(self.options.title or tab.title or APP_TITLE)
+                self.set_title(self._window_name or self.options.title
+                               or tab.title or APP_TITLE)
+
+        def rename_window(self, name):
+            """A manual/LLM window name (empty clears it)."""
+            self._window_name = (name or "").strip() or None
+            tab = self.active_tab()
+            if tab is not None:
+                self.update_tab_title(tab)
+            elif self._window_name:
+                self.set_title(self._window_name)
 
         def active_tab(self):
             page = self.notebook.get_current_page()
@@ -2751,6 +3757,44 @@ def build_native_classes(g):
             except Exception:
                 return None
 
+        # -- sessions (copilot P1) ------------------------------------------
+
+        def flush_pane_session(self, pane):
+            """Persist one terminal pane's journal as a session, if worthy."""
+            store = self._app.session_store
+            builder = getattr(pane, "build_session", None)
+            if store is None or builder is None:
+                return
+            try:
+                session = builder(
+                    self.options.native_config.assistant.sessions, time.time())
+            except Exception:
+                return
+            if session is not None:
+                store.save(session)
+
+        def flush_all_sessions(self):
+            for tab in self.tabs:
+                for pane in tab.panes.values():
+                    self.flush_pane_session(pane)
+
+        def _session_tick(self):
+            self.flush_all_sessions()
+            self._maybe_prompt_resume()
+            return GLib.SOURCE_CONTINUE
+
+        def insert_into_active_terminal(self, text):
+            """Type text (no newline) into the focused terminal pane."""
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is not None and pane.kind == "terminal":
+                pane.insert_text(text)
+            elif tab is not None:
+                tab.focus_recent_terminal()
+                active = tab.active_pane()
+                if active is not None and active.kind == "terminal":
+                    active.insert_text(text)
+
         def remove_tab(self, tab):
             if tab not in self.tabs:
                 return
@@ -2763,6 +3807,11 @@ def build_native_classes(g):
                 self.close()
 
         def _on_switch_page(self, notebook, page_widget, page_index):
+            # The ask bar is a window-level widget bound to the pane it
+            # opened over; dismiss it on a tab switch so take/close can't
+            # act on a pane in another (or a closed) tab.
+            if self._ask_close is not None:
+                self._ask_close()
             for tab in self.tabs:
                 if tab.widget is page_widget:
                     self.set_title(self.options.title or tab.title
@@ -2850,6 +3899,32 @@ def build_native_classes(g):
         def _active_pane(self):
             tab = self.active_tab()
             return tab.active_pane() if tab else None
+
+        def _on_dead_key(self, controller, keyval, keycode, state):
+            """A key press nothing in the window handled (bubble phase).
+
+            With focus on a viewer pane these are exactly the "typed
+            something, nothing happened" strokes; a quick run of them
+            usually means the user is hunting for a shortcut, so nudge
+            them toward the guide. Never consumes the key.
+            """
+            pane = self._active_pane()
+            if pane is None or pane.kind == "terminal":
+                return False
+            name = Gdk.keyval_name(keyval) or ""
+            if name == "Escape":
+                tab = self.active_tab()
+                if tab is not None:
+                    tab.focus_recent_terminal()
+                return True
+            if name in MODIFIER_KEYVAL_NAMES:
+                return False
+            if pane.pane_id != self._hint_pane_id:
+                self._hint_pane_id = pane.pane_id
+                self._hint_detector.reset()
+            if self._hint_detector.record(time.monotonic()):
+                pane.show_shortcut_hint()
+            return False
 
         def _route(self, method):
             pane = self._active_pane()
@@ -2940,6 +4015,52 @@ def build_native_classes(g):
             close_button.connect("clicked", lambda *_: dialog.close())
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             box.append(label)
+            box.append(close_button)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        def show_about(self):
+            info = build_info()
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title(f"About {APP_TITLE}")
+            dialog.set_default_size(420, 200)
+            title = Gtk.Label()
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            title.set_markup(
+                f"<b>{html.escape(APP_TITLE)}</b>  {html.escape(VERSION)}")
+            # The branch/commit the running executable was built from — the
+            # answer to "which version am I dogfooding".
+            grid = Gtk.Grid()
+            grid.set_row_spacing(4)
+            grid.set_column_spacing(16)
+            rows = [("branch", info.branch),
+                    ("commit", info.commit + (" (modified)" if info.dirty
+                                              else "")),
+                    ("source", str(Path(__file__).resolve().parent.parent))]
+            for row, (name, value) in enumerate(rows):
+                key = Gtk.Label(label=name)
+                key.set_xalign(0.0)
+                key.add_css_class("intent-endpoint")
+                val = Gtk.Label(label=value)
+                val.set_xalign(0.0)
+                val.set_selectable(True)
+                val.set_wrap(True)
+                grid.attach(key, 0, row, 1, 1)
+                grid.attach(val, 1, row, 1, 1)
+            close_button = Gtk.Button(label="Close")
+            close_button.connect("clicked", lambda *_: dialog.close())
+            close_button.set_halign(Gtk.Align.END)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_top(16)
+            box.set_margin_bottom(16)
+            box.set_margin_start(16)
+            box.set_margin_end(16)
+            box.append(title)
+            box.append(grid)
             box.append(close_button)
             dialog.set_child(box)
             self._close_on_escape(dialog)
@@ -3045,10 +4166,1473 @@ def build_native_classes(g):
                 self._route("zoom_out")
             elif name == "zoom-reset":
                 self._route("zoom_reset")
+            elif name == "copilot-menu":
+                self.show_completion_menu()
+            elif name == "copilot-ask":
+                self.show_ask_overlay()
+            elif name == "copilot-model":
+                self.show_model_picker()
+            elif name == "copilot-digest-mode":
+                self.toggle_copilot_digest_mode()
+            elif name == "pane-eject":
+                self.eject_active_pane()
+            elif name == "pane-send":
+                self.show_send_pane_picker()
+            elif name == "pane-rename":
+                self.rename_active_pane()
+            elif name == "window-rename":
+                self.rename_current_window()
+            elif name == "workspace-name":
+                self.show_name_workspace()
+            elif name == "copilot-summary":
+                self.show_session_summary()
+            elif name == "copilot-pause":
+                self.toggle_copilot_pause()
+            elif name == "copilot-debug":
+                self.show_copilot_journal()
+            elif name == "copilot-sessions":
+                self.show_sessions()
             elif name == "shortcuts":
                 self.show_shortcuts()
             elif name == "preferences":
                 self.show_preferences()
+            elif name == "about":
+                self.show_about()
+
+        def show_copilot_journal(self):
+            """Dump the active pane's command journal into a viewer pane."""
+            pane = self._active_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return
+            directory = Path(copilot_shell.default_wrapper_dir())
+            path = directory / f"journal-{pane.pane_id}.md"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path.write_text(journal.to_markdown(), encoding="utf-8")
+            except OSError:
+                return
+            self.open_path(str(path))
+
+        # -- completion menu + pause (copilot P2) ---------------------------
+
+        def _ask_commit(self, pane, command, run):
+            """The ONLY path that may feed a submit byte.
+
+            The taken command is typed with no trailing newline; it is
+            *run* (a carriage return fed) only when auto-pilot cleared it
+            via can_take. Every other insert in the app is newline-free.
+            """
+            pane.insert_text(command)
+            if run:
+                pane.insert_text("\r")
+            pane.focus()
+
+        def _copy_text(self, text):
+            try:
+                self.get_clipboard().set(text)
+            except Exception:
+                pass
+
+        def show_ask_overlay(self):
+            """In-place ask mode: an LLM chat in a slide-in bar (Ctrl+?).
+
+            The bar is an ordinary in-window widget (a Gtk.Revealer), never
+            a modal popover — so it can never grab the window or trap
+            keystrokes. The half-typed shell line is carried in as redacted
+            context and parked (cleared); the answer can be taken back onto
+            the line with one key. Nothing runs without a keystroke unless
+            auto-pilot has cleared a safe command. All network work goes
+            through the gated, redacting choke point in copilot.llm on a
+            worker thread.
+            """
+            pane = self._active_pane()
+            if pane is None or pane.kind != "terminal":
+                # Active pane is a viewer (e.g. the Copilot Journal); target
+                # the tab's terminal instead so Ctrl+? still opens.
+                pane = self._recent_terminal_pane()
+            if pane is None:
+                return
+            ask_cfg = self.options.native_config.assistant.ask
+            if not ask_cfg.enabled:
+                return
+            llm_cfg = self.options.native_config.assistant.llm
+            chain, eligible = self._resolve_copilot_chain()
+
+            # Close any already-open bar FIRST: its close restores its own
+            # parked draft onto the shell line before we read and re-park it,
+            # so two sessions never fight over the line.
+            if self._ask_close is not None:
+                self._ask_close()
+
+            # Seed: carry the current shell line as context, then park it —
+            # but only when there is an eligible endpoint to send it to. A
+            # gated bar never sends anything, so it must not disturb the line.
+            seed = ""
+            tracker = getattr(pane, "_tracker", None)
+            if eligible and ask_cfg.carry_draft and tracker is not None:
+                seed = tracker.typed_prefix() or ""
+            session = copilot_ask.AskSession(
+                seed=seed, carry_draft=ask_cfg.carry_draft,
+                max_turns=ask_cfg.max_turns)
+            if session.parked:
+                pane.insert_text("\x15")   # Ctrl-U: park (clear) the line
+
+            token = object()
+            self._ask_token = token
+            state = {"took": False, "busy": False, "answer": None,
+                     "explain_label": None, "card": None}
+
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            content.add_css_class("copilot-ask")
+            # Header: the ASK badge is the unmistakable mode signal.
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            badge = Gtk.Label(label="⌁ ASK")
+            badge.add_css_class("ask-badge")
+            model_lbl = Gtk.Label(label=copilot_llm.chain_label(
+                chain, llm_cfg.allow_remote_context)
+                + f"  ·  ctx: {self._effective_digest_mode(llm_cfg)}")
+            model_lbl.set_xalign(0.0)
+            model_lbl.set_hexpand(True)
+            model_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            model_lbl.add_css_class("intent-endpoint")
+            close_btn = Gtk.Button(label="✕")
+            close_btn.add_css_class("flat")
+            close_btn.set_tooltip_text("Close ask mode (Esc)")
+            header.append(badge)
+            header.append(model_lbl)
+            header.append(close_btn)
+            transcript = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                 spacing=8)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                               Gtk.PolicyType.AUTOMATIC)
+            scroller.set_propagate_natural_height(True)
+            scroller.set_max_content_height(280)
+            scroller.set_child(transcript)
+            notice = Gtk.Label()
+            notice.set_xalign(0.0)
+            notice.set_wrap(True)
+            notice.add_css_class("intent-notice")
+            entry = Gtk.Entry()
+            entry.set_hexpand(True)
+            entry.set_placeholder_text("Ask the assistant…  (Enter to send)")
+            spinner = Gtk.Spinner()
+            entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                spacing=6)
+            entry_row.append(entry)
+            entry_row.append(spinner)
+            content.append(header)
+            # The model's-eye view: which task the copilot thinks you're on.
+            # If the segmentation is wrong you see it here (trust surface).
+            episode_now = self._current_episode()
+            if episode_now is not None and episode_now.records:
+                task_lbl = Gtk.Label(label=f"task: {episode_now.headline()}")
+                task_lbl.set_xalign(0.0)
+                task_lbl.set_wrap(True)
+                task_lbl.add_css_class("ask-task")
+                content.append(task_lbl)
+            if session.parked:
+                # Redact the chip too: a credential mid-typed on the prompt
+                # must not render verbatim (shoulder-surf / screen share).
+                chip = Gtk.Label(
+                    label=f"carrying: {copilot_redact.redact_line(seed)[0]}")
+                chip.set_xalign(0.0)
+                chip.set_wrap(True)
+                chip.add_css_class("ask-seed")
+                content.append(chip)
+            content.append(scroller)
+            content.append(notice)
+            content.append(entry_row)
+
+            if not eligible:
+                entry.set_sensitive(False)
+                session.state = copilot_ask.GATED
+                notice.set_text(
+                    "Only the cloud model (OpenAI) is configured and remote "
+                    "context is off — set assistant.llm.allow_remote_context "
+                    "to use it. Context is always redacted before sending."
+                    if chain else
+                    "No model endpoints configured. Add them to auth.json "
+                    "(see docs/copilot.md).")
+
+            def alive():
+                return self._ask_token is token
+
+            def close_ask():
+                # The single teardown path: hide the bar, restore the parked
+                # draft (unless a command was taken), return focus to the
+                # terminal. Idempotent via the token.
+                if self._ask_token is not token:
+                    return
+                self._ask_token = None
+                self._ask_close = None
+                self._ask_revealer.set_reveal_child(False)
+                self._ask_revealer.set_child(None)
+                self._refresh_status()
+                if session.parked and not state["took"]:
+                    pane.insert_text(seed)   # crash-safe (guarded)
+                try:
+                    pane.focus()
+                except Exception:
+                    pass
+
+            self._ask_close = close_ask
+            close_btn.connect("clicked", lambda *_: close_ask())
+
+            def scroll_to_end():
+                adj = scroller.get_vadjustment()
+                GLib.idle_add(lambda: (adj.set_value(adj.get_upper()),
+                                       GLib.SOURCE_REMOVE)[1])
+
+            def add_question_row(text):
+                row = Gtk.Label(label=f"you › {text}")
+                row.set_xalign(0.0)
+                row.set_wrap(True)
+                row.add_css_class("ask-question")
+                transcript.append(row)
+
+            def add_error_row(text):
+                row = Gtk.Label(label=text)
+                row.set_xalign(0.0)
+                row.set_wrap(True)
+                row.add_css_class("intent-notice")
+                transcript.append(row)
+                scroll_to_end()
+
+            def take(answer):
+                if answer is None:
+                    return
+                take_ok, run_ok = copilot_ask.can_take(
+                    answer.command, answer.risk_display,
+                    auto_pilot=ask_cfg.auto_pilot,
+                    ceiling=ask_cfg.auto_pilot_max_risk)
+                if not take_ok:
+                    # Multi-line: never fed to the shell — copy instead.
+                    self._copy_text(answer.command)
+                    notice.set_text("Multi-line command copied to the "
+                                    "clipboard (not inserted).")
+                    return
+                state["took"] = True
+                close_ask()
+                self._ask_commit(pane, answer.command, run=run_ok)
+
+            def explain(answer, label_widget):
+                if answer is None or state["busy"]:
+                    return
+                label_widget.set_text("…")
+                cfg, ch, cmd = llm_cfg, chain, answer.command
+
+                def work():
+                    try:
+                        text = copilot_llm.explain(cfg, cmd, chain=ch).text
+                    except copilot_llm.LlmError as exc:
+                        text = str(exc)
+                    GLib.idle_add(set_label, label_widget, text)
+
+                threading.Thread(target=work, daemon=True).start()
+
+            def set_label(label_widget, text):
+                if alive():
+                    label_widget.set_text(text)
+                return GLib.SOURCE_REMOVE
+
+            def add_answer_card(answer):
+                card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                card.add_css_class("intent-card")
+                # Focusable so the answer (not the entry) holds focus after it
+                # arrives: that is what arms the Y/N/T keys unambiguously and
+                # keeps a stray Enter from accepting (a Box has no default
+                # action, so Enter does nothing here).
+                card.set_focusable(True)
+                head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                               spacing=6)
+                cmd = Gtk.Label(label=answer.command)
+                cmd.set_xalign(0.0)
+                cmd.set_hexpand(True)
+                cmd.set_wrap(True)
+                cmd.set_selectable(True)
+                cmd.add_css_class("copilot-cmd")
+                badge = Gtk.Label(label=answer.risk_display)
+                badge.set_valign(Gtk.Align.START)
+                badge.add_css_class("risk-badge")
+                badge.add_css_class(f"risk-{answer.risk_display}")
+                head.append(cmd)
+                head.append(badge)
+                card.append(head)
+                if answer.description:
+                    desc = Gtk.Label(label=answer.description)
+                    desc.set_xalign(0.0)
+                    desc.set_wrap(True)
+                    desc.add_css_class("copilot-desc")
+                    card.append(desc)
+                take_ok, run_ok = copilot_ask.can_take(
+                    answer.command, answer.risk_display,
+                    auto_pilot=ask_cfg.auto_pilot,
+                    ceiling=ask_cfg.auto_pilot_max_risk)
+                via = f"via {answer.endpoint}" if answer.endpoint else ""
+                cue = ("Y takes and runs it" if run_ok else
+                       "press Y to take it onto the line" if take_ok else
+                       "multi-line — copies only")
+                meta = Gtk.Label(label=f"{via} · {cue}".strip(" ·"))
+                meta.set_xalign(0.0)
+                meta.set_wrap(True)
+                meta.add_css_class("copilot-desc")
+                card.append(meta)
+                explain_label = Gtk.Label()
+                explain_label.set_xalign(0.0)
+                explain_label.set_wrap(True)
+                explain_label.add_css_class("intent-explain")
+                buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+                take_btn = Gtk.Button(label="Take (Y)")
+                take_btn.connect("clicked", lambda *_: take(answer))
+                cancel_btn = Gtk.Button(label="Cancel (N)")
+                cancel_btn.connect("clicked", lambda *_: close_ask())
+                explain_btn = Gtk.Button(label="Explain (T)")
+                explain_btn.connect(
+                    "clicked", lambda *_: explain(answer, explain_label))
+                buttons.append(take_btn)
+                buttons.append(cancel_btn)
+                buttons.append(explain_btn)
+                card.append(buttons)
+                card.append(explain_label)
+                transcript.append(card)
+                state["answer"] = answer
+                state["explain_label"] = explain_label
+                state["card"] = card
+                scroll_to_end()
+
+            def on_result(result):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                state["busy"] = False
+                if not result.templates:
+                    session.add_error("No suggestion came back.")
+                    add_error_row("No suggestion came back — try rephrasing.")
+                    entry.grab_focus()
+                    return GLib.SOURCE_REMOVE
+                template = result.templates[0]
+                session.add_answer(command=template.command,
+                                   description=template.description,
+                                   risk_display=template.risk.display,
+                                   endpoint=result.endpoint)
+                if result.note:
+                    notice.set_text(result.note)
+                add_answer_card(session.last_answer())
+                # Move focus to the answer card so Y/N/T act on it (armed
+                # only while the entry is unfocused, matching hotkeys_armed).
+                # Gate on focus, not text: if the user is actively typing a
+                # follow-up the entry keeps focus (never yank it mid-word);
+                # if focus already left the entry (e.g. click-away to the
+                # VTE) the card grabs it so keystrokes stay captured, not
+                # fed to the parked shell line.
+                if state["card"] is not None and not entry.has_focus():
+                    state["card"].grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def on_error(message):
+                if not alive():
+                    return GLib.SOURCE_REMOVE
+                spinner.stop()
+                state["busy"] = False
+                session.add_error(message)
+                add_error_row(message)
+                entry.grab_focus()
+                return GLib.SOURCE_REMOVE
+
+            def submit_question(text):
+                if state["busy"] or not eligible:
+                    return
+                query = session.begin_question(text)
+                add_question_row(text)
+                entry.set_text("")
+                notice.set_text("")
+                spinner.start()
+                state["busy"] = True
+                cfg, ch = llm_cfg, chain
+                context = self._assistant_context()   # on the GTK thread
+                episode = context.pop("episode")
+                draft = session.seed or None
+                mode = self._effective_digest_mode(llm_cfg)
+
+                def work():
+                    try:
+                        # In "llm" mode an extra call summarizes the salient
+                        # command's (already-redacted) output; it runs here on
+                        # the worker thread and falls back to the heuristic
+                        # digest on failure. Built inside work() because it is
+                        # network. send_output="none" sends no output at all.
+                        summarize = None
+                        if (mode == "llm" and episode is not None
+                                and cfg.send_output != "none"):
+                            summarize = _llm_summarizer(cfg, ch, query)
+                        # The distilled, redacted terminal-activity block,
+                        # salience-ranked by this question.
+                        activity = (copilot_askcontext.build_ask_context(
+                            episode, question=query, draft=draft or "",
+                            output_mode=cfg.send_output, summarize=summarize)
+                            if episode else None)
+                        result = copilot_llm.suggest_commands(
+                            cfg, query=query, chain=ch, draft_command=draft,
+                            activity=activity, **context)
+                        GLib.idle_add(on_result, result)
+                    except copilot_llm.LlmError as exc:
+                        GLib.idle_add(on_error, str(exc))
+
+                threading.Thread(target=work, daemon=True).start()
+
+            def on_activate(_entry):
+                # Enter only ever submits a follow-up; it never accepts an
+                # answer (so a stray/held/auto-repeat Enter can't run a
+                # command). Accept is Y, or the Take button.
+                text = entry.get_text().strip()
+                if text:
+                    submit_question(text)
+
+            def on_key(controller, keyval, keycode, kstate):
+                name = (Gdk.keyval_name(keyval) or "").lower()
+                if name == "escape":
+                    close_ask()
+                    return True
+                # Y/N/T are hotkeys only on a shown answer while the entry is
+                # NOT focused; once the user clicks the entry to type a
+                # follow-up, they are ordinary characters (the focused entry
+                # also consumes them before this bubble-phase controller).
+                if not copilot_ask.hotkeys_armed(session.state,
+                                                 entry.has_focus()):
+                    return False
+                if name == "y":
+                    take(state["answer"])
+                    return True
+                if name == "n":
+                    close_ask()
+                    return True
+                if name == "t":
+                    explain(state["answer"], state["explain_label"])
+                    return True
+                return False
+
+            entry.connect("activate", on_activate)
+            keys = Gtk.EventControllerKey()
+            keys.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            keys.connect("key-pressed", on_key)
+            content.add_controller(keys)
+
+            # Reveal the bar (this IS the mode signal) and focus the entry.
+            # An in-window widget never grabs the window, so the titlebar and
+            # the terminal stay live; the deferred grab avoids the
+            # unmapped-widget no-op while the revealer animates in.
+            self._ask_revealer.set_child(content)
+            self._ask_revealer.set_reveal_child(True)
+            self._refresh_status()
+            if eligible:
+                GLib.idle_add(
+                    lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
+
+        def _recent_terminal_pane(self):
+            """The terminal an assistant action should target — the recent
+            one, or any terminal in the tab, even when a viewer/journal pane
+            is the active/focused pane."""
+            tab = self.active_tab()
+            if tab is None:
+                return None
+            pane = tab.panes.get(getattr(tab, "_recent_terminal_id", None))
+            if pane is not None and pane.kind == "terminal":
+                return pane
+            return next((p for p in tab.panes.values()
+                         if p.kind == "terminal"), None)
+
+        def _current_episode(self):
+            """The task the recent terminal is on (for the ask-bar header and
+            context), or None with no shell integration."""
+            pane = self._recent_terminal_pane()
+            journal = getattr(pane, "journal", None) if pane else None
+            if journal is None:
+                return None
+            return copilot_episode.current_episode(journal.snapshot())
+
+        def _assistant_context(self):
+            """cwd + project + the current episode from the recent terminal."""
+            pane = self._recent_terminal_pane()
+            cwd = None
+            if pane is not None:
+                try:
+                    cwd = pane.current_directory()
+                except Exception:
+                    cwd = None
+            project = os.path.basename(cwd.rstrip("/")) if cwd else None
+            return {"cwd": cwd, "project": project or None,
+                    "episode": self._current_episode()}
+
+        def toggle_copilot_pause(self):
+            pane = self._active_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return
+            journal.paused = not journal.paused
+            self._flash_pane(pane, "Copilot paused" if journal.paused
+                             else "Copilot resumed")
+
+        def _effective_digest_mode(self, llm_cfg):
+            """The digest mode in force: the session A/B override, else the
+            configured llm.digest_mode."""
+            return getattr(self, "_digest_mode_override", None) \
+                or llm_cfg.digest_mode
+
+        def toggle_copilot_digest_mode(self):
+            """Flip context building between the heuristic digester and the
+            LLM summarizer for the session (Ctrl+Shift+D) — the A/B switch.
+            Takes effect on the next question."""
+            llm_cfg = self.options.native_config.assistant.llm
+            current = self._effective_digest_mode(llm_cfg)
+            self._digest_mode_override = ("llm" if current == "heuristic"
+                                          else "heuristic")
+            self._refresh_status()
+            pane = self._active_pane()
+            if pane is not None:
+                self._flash_pane(pane, "Context: " + (
+                    "LLM-summarized" if self._digest_mode_override == "llm"
+                    else "heuristic digest"))
+
+        def _flash_pane(self, pane, text, duration=1100):
+            """Briefly show a quiet chip over a terminal pane (no focus grab)."""
+            anchor = getattr(pane, "terminal", None)
+            if anchor is None:
+                return
+            popover = Gtk.Popover()
+            popover.set_parent(anchor)
+            popover.set_autohide(False)
+            popover.set_position(Gtk.PositionType.TOP)
+            label = Gtk.Label(label=text)
+            label.add_css_class("copilot-flash")
+            popover.set_child(label)
+            popover.popup()
+
+            def dismiss():
+                popover.popdown()
+                popover.unparent()
+                return GLib.SOURCE_REMOVE
+
+            GLib.timeout_add(duration, dismiss)
+
+        def _recent_terminal_pane(self):
+            tab = self.active_tab()
+            if tab is None:
+                return None
+            pane = tab.panes.get(tab._recent_terminal_id)
+            if pane is None or pane.kind != "terminal":
+                pane = next((p for p in tab.panes.values()
+                             if p.kind == "terminal"), None)
+            return pane
+
+        def show_session_summary(self):
+            """Summarize the recent terminal session (LLM-polished if on)."""
+            pane = self._recent_terminal_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None or not journal.snapshot():
+                return
+            records = journal.snapshot()
+            try:
+                cwd = pane.current_directory()
+            except Exception:
+                cwd = None
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_title("Session Summary")
+            dialog.set_default_size(460, 260)
+            label = Gtk.Label()
+            label.set_wrap(True)
+            label.set_xalign(0.0)
+            label.set_yalign(0.0)
+            label.set_margin_top(16)
+            label.set_margin_bottom(16)
+            label.set_margin_start(16)
+            label.set_margin_end(16)
+            label.set_selectable(True)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_child(label)
+            source = Gtk.Label()
+            source.set_xalign(0.0)
+            source.add_css_class("intent-endpoint")
+            source.set_margin_start(16)
+            source.set_margin_end(16)
+            source.set_margin_bottom(8)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.append(scroller)
+            box.append(source)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            self._summary_dialog = dialog
+            heuristic = copilot_sessions.summarize(records, cwd)
+            llm_config = self.options.native_config.assistant.llm
+            chain = copilot_llm.resolve_chain(llm_config)
+            eligible = copilot_llm.eligible_endpoints(
+                chain, llm_config.allow_remote_context)
+            if not eligible:
+                # No usable model — show the instant heuristic summary.
+                label.set_text(heuristic)
+                source.set_text("heuristic summary · no model available")
+                dialog.present()
+                return
+            label.set_text("Summarizing…")
+            source.set_text("local model…")
+            dialog.present()
+            recent = [r.cmd for r in records if r.cmd]
+            project = os.path.basename(cwd.rstrip("/")) if cwd else None
+
+            def work():
+                try:
+                    completion = copilot_llm.summarize(
+                        llm_config, cwd=cwd, project=project,
+                        recent_commands=recent, chain=chain)
+                    text = completion.text or heuristic
+                    origin = f"via {completion.endpoint}"
+                except copilot_llm.LlmError:
+                    text = heuristic
+                    origin = "heuristic summary · no model reachable"
+
+                def apply():
+                    label.set_text(text)
+                    source.set_text(origin)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(apply)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _resume_due(self):
+            """Has the recent terminal gone idle after meaningful work?"""
+            assistant = self.options.native_config.assistant
+            if not (assistant.enabled and assistant.resume.enabled):
+                return False
+            pane = self._recent_terminal_pane()
+            journal = getattr(pane, "journal", None)
+            if journal is None:
+                return False
+            idle = journal.idle_seconds(time.monotonic())
+            threshold = max(assistant.resume.idle_minutes, 1) * 60
+            if idle is None or idle < threshold:
+                return False
+            return copilot_sessions.is_meaningful(journal.snapshot())
+
+        def _maybe_prompt_resume(self):
+            if not self._resume_due():
+                self._resume_prompted = False   # reset once active again
+                return
+            # Only nag the window the user is actually looking at, and only
+            # once per idle period.
+            if self._resume_prompted or not self.is_active():
+                return
+            self._resume_prompted = True
+            self._flash_pane(
+                self._recent_terminal_pane(),
+                "Idle here a while — View ▸ Session Summary recaps it",
+                duration=4500)
+
+        def show_completion_menu(self):
+            pane = self._active_pane()
+            if pane is None or pane.kind != "terminal":
+                return
+            if not self.options.native_config.assistant.suggestions.menu:
+                return
+            journal = getattr(pane, "journal", None)
+            if journal is not None and journal.paused:
+                self._flash_pane(pane, "Copilot paused")
+                return
+            history = ([r.cmd for r in journal.snapshot() if r.cmd]
+                       if journal is not None else [])
+            recipes = (copilot_recipes.BUILTIN_RECIPES
+                       if self.options.native_config.assistant.recipes.enabled
+                       else ())
+            # Gather context once, on open (no background scanning).
+            typed = ""
+            tracker = getattr(pane, "_tracker", None)
+            if tracker is not None:
+                typed = tracker.typed_prefix() or ""
+            cwd = self._active_terminal_cwd()
+            project = copilot_context.detect_project(cwd) if cwd else None
+            readme_blocks = self._read_readme(cwd)
+            providers = {copilot_context.SSH_HOSTS: copilot_context.ssh_hosts()}
+            if project is not None and ".git" in project.files:
+                providers[copilot_context.BRANCHES] = self._git_lines(
+                    cwd, ["branch", "--format=%(refname:short)"])
+                providers[copilot_context.CHANGED_FILES] = [
+                    line[3:] for line in self._git_lines(
+                        cwd, ["status", "--porcelain"]) if len(line) > 3]
+            typo_enabled = (self.options.native_config.assistant
+                            .suggestions.typo_correction)
+            if self._completion_popover is not None:
+                self._completion_popover.popdown()
+
+            popover = Gtk.Popover()
+            self._completion_popover = popover
+            popover.add_css_class("copilot-menu")
+            popover.set_parent(pane.terminal)
+            popover.set_position(Gtk.PositionType.BOTTOM)
+            popover.set_pointing_to(self._cursor_rect(pane.terminal))
+
+            entry = Gtk.SearchEntry()
+            entry.set_placeholder_text("Search commands and recipes…")
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_min_content_height(240)
+            scroller.set_min_content_width(420)
+            scroller.set_child(listbox)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            box.append(entry)
+            box.append(scroller)
+            popover.set_child(box)
+
+            def populate(query):
+                child = listbox.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    listbox.remove(child)
+                    child = nxt
+                for suggestion in self._gather_menu_suggestions(
+                        query, cwd=cwd, project=project,
+                        readme_blocks=readme_blocks, providers=providers,
+                        history=history, recipes=recipes,
+                        typo_enabled=typo_enabled):
+                    listbox.append(self._suggestion_row(suggestion))
+                first = listbox.get_row_at_index(0)
+                if first is not None:
+                    listbox.select_row(first)
+
+            def accept(row):
+                suggestion = getattr(row, "_suggestion", None)
+                if suggestion is None:
+                    return
+                popover.popdown()
+                self._accept_suggestion(pane, suggestion, typed)
+
+            entry.connect("search-changed",
+                          lambda e: populate(e.get_text()))
+            entry.connect("activate",
+                          lambda e: accept(listbox.get_selected_row()))
+            # Gtk.SearchEntry consumes Escape as "stop-search", so the
+            # popover's own Escape handling never sees it; close explicitly.
+            entry.connect("stop-search", lambda e: popover.popdown())
+            listbox.connect("row-activated", lambda box, row: accept(row))
+            escape = Gtk.EventControllerKey()
+
+            def on_escape(controller, keyval, keycode, state):
+                if Gdk.keyval_name(keyval) == "Escape":
+                    popover.popdown()
+                    return True
+                return False
+
+            escape.connect("key-pressed", on_escape)
+            popover.add_controller(escape)
+
+            def on_closed(p):
+                p.unparent()
+                if self._completion_popover is p:
+                    self._completion_popover = None
+                pane.focus()
+
+            popover.connect("closed", on_closed)
+            entry.set_text(typed)             # seed with the current line
+            entry.set_position(-1)
+            populate(typed)
+            popover.popup()
+            entry.grab_focus()
+
+        def _gather_menu_suggestions(self, query, *, cwd, project,
+                                     readme_blocks, providers, history,
+                                     recipes, typo_enabled, limit=12):
+            """Merge typo, context, and fuzzy suggestions for the menu."""
+            merged, seen = [], set()
+
+            def take(items):
+                for suggestion in items:
+                    if suggestion.command not in seen:
+                        seen.add(suggestion.command)
+                        merged.append(suggestion)
+
+            if typo_enabled and query.strip():
+                correction = copilot_typo.correct_command(
+                    query, known=known_commands(), history=history)
+                if correction is not None and correction.reason == "command":
+                    take([copilot_suggest.make_suggestion(
+                        correction.corrected, "did you mean", score=9.0)])
+            take(copilot_context.menu_suggestions(
+                query, cwd, project=project, readme_blocks=readme_blocks,
+                providers=providers))
+            take(copilot_suggest.build_suggestions(
+                query, recipes=recipes, history=history))
+            return merged[:limit]
+
+        def _read_readme(self, cwd):
+            if not cwd:
+                return ()
+            for name in ("README.md", "README", "README.rst", "readme.md",
+                         "Readme.md"):
+                try:
+                    text = Path(cwd, name).read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                return parse_markdown_blocks(text)
+            return ()
+
+        def _git_lines(self, cwd, args):
+            if not cwd:
+                return []
+            try:
+                result = subprocess.run(
+                    ["git", "-C", cwd, *args], capture_output=True,
+                    text=True, timeout=1.5)
+            except (OSError, subprocess.SubprocessError):
+                return []
+            if result.returncode != 0:
+                return []
+            return [line.strip() for line in result.stdout.splitlines()
+                    if line.strip()]
+
+        def _accept_suggestion(self, pane, suggestion, typed=""):
+            """Insert a chosen command; never with a trailing newline."""
+            clear, text = copilot_suggest.insert_plan(typed,
+                                                      suggestion.command)
+            if clear:
+                pane.insert_text("\x15")   # Ctrl-U: clear the input line
+            pane.insert_text(text)
+            pane.focus()
+
+        def _cursor_rect(self, terminal):
+            try:
+                col, row = terminal.get_cursor_position()
+                cw = terminal.get_char_width()
+                ch = terminal.get_char_height()
+                top = terminal.get_vadjustment().get_value()
+                rect = Gdk.Rectangle()
+                rect.x = int(col * cw)
+                rect.y = int((row - top) * ch)
+                rect.width = int(cw)
+                rect.height = int(ch)
+                return rect
+            except Exception:
+                rect = Gdk.Rectangle()
+                rect.x = rect.y = 0
+                rect.width = rect.height = 1
+                return rect
+
+        def _suggestion_row(self, suggestion):
+            row = Gtk.ListBoxRow()
+            row._suggestion = suggestion
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            inner.set_margin_top(4)
+            inner.set_margin_bottom(4)
+            inner.set_margin_start(8)
+            inner.set_margin_end(8)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            cmd = Gtk.Label(label=suggestion.command)
+            cmd.set_xalign(0.0)
+            cmd.set_hexpand(True)
+            cmd.set_ellipsize(Pango.EllipsizeMode.END)
+            cmd.add_css_class("copilot-cmd")
+            badge = Gtk.Label(label=suggestion.risk.display)
+            badge.add_css_class("risk-badge")
+            badge.add_css_class(f"risk-{suggestion.risk.display}")
+            top.append(cmd)
+            top.append(badge)
+            inner.append(top)
+            caption = suggestion.description or f"from {suggestion.label}"
+            desc = Gtk.Label(label=caption)
+            desc.set_xalign(0.0)
+            desc.add_css_class("copilot-desc")
+            inner.append(desc)
+            row.set_child(inner)
+            return row
+
+        # -- session browser (copilot P1) -----------------------------------
+
+        def show_sessions(self):
+            store = self._app.session_store
+            if store is None:
+                return
+            # Flush current panes first so the just-worked session is listed.
+            self.flush_all_sessions()
+            dialog = Gtk.Window()
+            self._sessions_dialog = dialog
+            dialog.connect("close-request",
+                           lambda *_: setattr(self, "_sessions_dialog", None))
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Session History")
+            dialog.set_default_size(560, 620)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            listbox = Gtk.ListBox()
+            listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+            sessions = store.list()
+            for summary in sessions:
+                listbox.append(self._session_row(summary))
+            if not sessions:
+                empty = Gtk.Label(label="No saved sessions yet.")
+                empty.set_margin_top(24)
+                listbox.append(empty)
+            listbox.connect(
+                "row-activated",
+                lambda box, row: self._restore_session(dialog, row))
+            scroller.set_child(listbox)
+            restore = Gtk.Button(label="Restore")
+            restore.connect("clicked", lambda *_: self._restore_session(
+                dialog, listbox.get_selected_row()))
+            insert = Gtk.Button(label="Insert last command")
+            insert.connect("clicked", lambda *_: self._insert_session_command(
+                dialog, listbox.get_selected_row()))
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: dialog.close())
+            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            buttons.set_halign(Gtk.Align.END)
+            buttons.append(insert)
+            buttons.append(restore)
+            buttons.append(close)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(8)
+            box.set_margin_end(8)
+            # Detected workspaces (sessions that were active together) → open
+            # them as one bounded split-pane window.
+            ws = self.options.native_config.assistant.workspace
+            detected = copilot_jobs.cluster(
+                sessions, gap_s=max(ws.job_gap_minutes, 1) * 60)
+            if detected:
+                heading = Gtk.Label(label="Workspaces")
+                heading.set_xalign(0.0)
+                heading.add_css_class("heading")
+                box.append(heading)
+                jobs_list = Gtk.ListBox()
+                jobs_list.set_selection_mode(Gtk.SelectionMode.NONE)
+                for job in detected:
+                    jobs_list.append(self._job_row(job))
+                box.append(jobs_list)
+            box.append(scroller)
+            box.append(buttons)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        def _job_row(self, job):
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+            box.set_margin_start(10)
+            box.set_margin_end(6)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            text.set_hexpand(True)
+            title = Gtk.Label(label=job.title or "workspace")
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            meta = Gtk.Label(label=f"{job.size} sessions active together")
+            meta.set_xalign(0.0)
+            meta.add_css_class("dim-label")
+            text.append(title)
+            text.append(meta)
+            button = Gtk.Button(label="Open workspace")
+            button.connect("clicked", lambda *_: self._restore_job(
+                job, dialog=self._sessions_dialog))
+            box.append(text)
+            box.append(button)
+            row.set_child(box)
+            return row
+
+        def _session_row(self, summary):
+            row = Gtk.ListBoxRow()
+            row._session = summary
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            inner.set_margin_top(6)
+            inner.set_margin_bottom(6)
+            inner.set_margin_start(10)
+            inner.set_margin_end(10)
+            title = Gtk.Label(label=summary.title)
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            meta = f"{summary.cwd_last or '?'} · {summary.command_count} cmds"
+            subtitle = Gtk.Label(label=meta)
+            subtitle.set_xalign(0.0)
+            subtitle.add_css_class("dim-label")
+            inner.append(title)
+            inner.append(subtitle)
+            # Episodes: lazily segment the stored session on first expand so a
+            # long list isn't loaded up front. Each episode restores on its own
+            # (its own cwd + history seed).
+            expander = Gtk.Expander(label="episodes")
+            expander.add_css_class("dim-label")
+            ep_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            ep_box.set_margin_start(8)
+            ep_box.set_margin_top(4)
+            expander.set_child(ep_box)
+            state = {"loaded": False}
+
+            def on_toggle(*_):
+                if state["loaded"] or not expander.get_expanded():
+                    return
+                state["loaded"] = True
+                store = self._app.session_store
+                record = store.load(summary.id) if store else None
+                episodes = copilot_resume.episodes_of(record) if record else []
+                if not episodes:
+                    ep_box.append(Gtk.Label(label="(no episodes)"))
+                    return
+                for index, episode in enumerate(episodes):
+                    ep_box.append(self._episode_row(summary, index, episode))
+
+            expander.connect("notify::expanded", on_toggle)
+            inner.append(expander)
+            row.set_child(inner)
+            return row
+
+        def _episode_row(self, summary, index, episode):
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            label = Gtk.Label(label=episode.headline())
+            label.set_xalign(0.0)
+            label.set_hexpand(True)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            label.add_css_class("dim-label")
+            button = Gtk.Button(label="Resume")
+            button.add_css_class("flat")
+            button.connect("clicked", lambda *_: self._restore_episode(
+                episode, summary, index, dialog=self._sessions_dialog))
+            box.append(label)
+            box.append(button)
+            return box
+
+        def _write_seed_file(self, episode, tag):
+            """Write an episode's command history to a temp seed file the
+            restored pane's shell loads (AGENT_TERMINAL_SEED_HISTFILE). Returns
+            the path, or None when there is nothing to seed."""
+            content = copilot_resume.seed_file_content(episode)
+            if not content:
+                return None
+            directory = Path(copilot_shell.default_wrapper_dir()) / "seeds"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"seed-{tag}.hist"
+                path.write_text(content, encoding="utf-8")
+            except OSError:
+                return None
+            return str(path)
+
+        def _restore_episode(self, episode, summary, index, dialog=None):
+            """Reopen a terminal in the episode's cwd, with just that episode's
+            commands seeded for up-arrow recall."""
+            cwd = copilot_resume.resume_cwd(episode) or (
+                summary.cwd_last if summary else None)
+            cwd = cwd if cwd and os.path.isdir(cwd) else None
+            tag = f"{getattr(summary, 'id', 'session')}-ep{index}"
+            seed = self._write_seed_file(episode, tag)
+            env = ({"AGENT_TERMINAL_SEED_HISTFILE": seed} if seed else None)
+            self.add_terminal_tab(working_directory=cwd, extra_env=env,
+                                  title=episode.title)
+            if dialog is not None:
+                dialog.close()
+
+        def _restore_session(self, dialog, row):
+            summary = getattr(row, "_session", None)
+            if summary is None:
+                return
+            store = self._app.session_store
+            record = store.load(summary.id) if store else None
+            episodes = copilot_resume.episodes_of(record) if record else []
+            if episodes:
+                # "Restore" resumes the last stretch of work (the most recent
+                # episode); the expander offers the earlier ones.
+                self._restore_episode(episodes[-1], summary, len(episodes) - 1)
+            else:
+                cwd = summary.cwd_last if summary.cwd_last and os.path.isdir(
+                    summary.cwd_last) else None
+                self.add_terminal_tab(working_directory=cwd)
+            summary_path = store.summary_path(summary.id) if store else None
+            if summary_path and os.path.isfile(summary_path):
+                self.open_path(summary_path)
+            dialog.close()
+
+        # -- workspaces: job restore + confirm/revert (copilot Phase B) ------
+
+        def _show_confirm_revert(self, message, on_revert, seconds=None):
+            """A "Keep / Revert (auto-revert in N s)" bar for a workspace
+            rearrange — act first, offer undo, like a display-resolution
+            change. `on_revert` runs on timeout or on Revert."""
+            ws = self.options.native_config.assistant.workspace
+            seconds = seconds if seconds is not None else ws.revert_seconds
+            token = object()
+            self._revert_token = token
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            bar.add_css_class("workspace-confirm")
+            label = Gtk.Label(label=message)
+            label.set_xalign(0.0)
+            label.set_hexpand(True)
+            label.set_wrap(True)
+            keep = Gtk.Button(label="Keep")
+            revert = Gtk.Button(label=f"Revert ({seconds}s)")
+            revert.add_css_class("destructive-action")
+            bar.append(label)
+            bar.append(revert)
+            bar.append(keep)
+            self._workspace_revealer.set_child(bar)
+            self._workspace_revealer.set_reveal_child(True)
+            state = {"left": seconds}
+
+            def close():
+                if self._revert_token is not token:
+                    return
+                self._revert_token = None
+                self._workspace_revealer.set_reveal_child(False)
+
+            def do_revert():
+                if self._revert_token is not token:
+                    return
+                close()
+                try:
+                    on_revert()
+                except Exception:
+                    pass
+
+            def tick():
+                if self._revert_token is not token:
+                    return False
+                state["left"] -= 1
+                if state["left"] <= 0:
+                    do_revert()
+                    return False
+                revert.set_label(f"Revert ({state['left']}s)")
+                return True
+
+            keep.connect("clicked", lambda *_: close())
+            revert.connect("clicked", lambda *_: do_revert())
+            GLib.timeout_add_seconds(1, tick)
+
+        def _workspace_cell_px(self):
+            """Char cell size (w, h) of a real terminal, for the pane floor."""
+            pane = self._recent_terminal_pane()
+            terminal = getattr(pane, "terminal", None)
+            try:
+                cw = int(terminal.get_char_width())
+                ch = int(terminal.get_char_height())
+                if cw > 0 and ch > 0:
+                    return (cw, ch)
+            except Exception:
+                pass
+            return (9, 18)
+
+        def _workspace_avail_px(self):
+            """Usable pane area of a window on this monitor (minus chrome)."""
+            try:
+                surface = self.get_surface()
+                monitor = self.get_display().get_monitor_at_surface(surface)
+                geo = monitor.get_geometry() if monitor else None
+                if geo and geo.width > 0:
+                    return (geo.width, max(geo.height - 120, 240))
+            except Exception:
+                pass
+            return (self.get_width() or 1400, self.get_height() or 900)
+
+        def _member_pane_spec(self, summary):
+            """(cwd, extra_env, title) to open one job member at its last
+            episode with that episode's history seeded."""
+            store = self._app.session_store
+            record = store.load(summary.id) if store else None
+            episodes = copilot_resume.episodes_of(record) if record else []
+            episode = episodes[-1] if episodes else None
+            cwd = (copilot_resume.resume_cwd(episode) if episode else None) \
+                or getattr(summary, "cwd_last", None)
+            cwd = cwd if cwd and os.path.isdir(cwd) else None
+            env = None
+            if episode is not None:
+                seed = self._write_seed_file(episode, f"{summary.id}-job")
+                if seed:
+                    env = {"AGENT_TERMINAL_SEED_HISTFILE": seed}
+            title = episode.title if episode else getattr(summary, "title", None)
+            return cwd, env, title
+
+        def _load_workspace(self, plan):
+            """Fill this window with a plan's members as split panes, dropping
+            the default tab it opened with."""
+            existing = list(self.tabs)
+            cwd, env, title = self._member_pane_spec(plan.members[0])
+            tab = self.add_terminal_tab(working_directory=cwd, extra_env=env,
+                                        title=title)
+            for index, member in enumerate(plan.members[1:], start=1):
+                cwd, env, title = self._member_pane_spec(member)
+                pane = self.create_terminal_pane(working_directory=cwd,
+                                                 extra_env=env, title=title)
+                # Alternate split axis so panes tile rather than stack.
+                orientation = (HORIZONTAL if index % 2 == 1 else VERTICAL)
+                tab.add_pane(pane, orientation)
+            for old in existing:
+                self.remove_tab(old)
+
+        def _restore_job(self, job, dialog=None):
+            ws = self.options.native_config.assistant.workspace
+            plans = copilot_jobs.pack(
+                job.members, avail_px=self._workspace_avail_px(),
+                cell_px=self._workspace_cell_px(),
+                min_cols=ws.min_pane_cols, min_rows=ws.min_pane_rows,
+                soft_max=ws.max_panes_per_window)
+            if not plans:
+                return
+            if dialog is not None:
+                dialog.close()
+            created = []
+            for plan in plans:
+                window = self._app.new_window()
+                window._load_workspace(plan)
+                created.append(window)
+            total = sum(plan.size for plan in plans)
+            where = (f" across {len(created)} windows"
+                     if len(created) > 1 else "")
+            created[0].present()
+            created[0]._show_confirm_revert(
+                f"Opened {total} panes as “{job.title or 'workspace'}”{where}"
+                " — Keep or Revert?",
+                on_revert=lambda: [w.close() for w in created])
+
+        # -- moving panes between windows, live (copilot Phase C) ------------
+
+        def _adopt_pane_new_tab(self, pane, drop_default=False):
+            """Install a pane (detached from elsewhere) as a new tab here. With
+            drop_default, remove the tabs the window opened with so it holds
+            only the moved pane."""
+            pane.on_exited = self._on_pane_exited
+            existing = list(self.tabs) if drop_default else []
+            tab = TerminalTab(self, pane)
+            self._append_tab(tab)
+            for old in existing:
+                self.remove_tab(old)
+            return tab
+
+        def eject_active_pane(self):
+            """Move the active pane out into a new window, alive (keeps its
+            process + scrollback)."""
+            tab = self.active_tab()
+            if tab is None:
+                return
+            if tab.pane_count() <= 1 and len(self.tabs) <= 1:
+                self._flash_pane(tab.active_pane(),
+                                 "Only pane here — nothing to eject")
+                return
+            pane = tab.active_pane()
+            detached = tab.detach_pane(pane.pane_id)
+            if detached is None:
+                return
+            target = self._app.new_window()
+            target._adopt_pane_new_tab(detached, drop_default=True)
+            target.present()
+
+        def send_active_pane_to(self, target):
+            """Move the active pane into another window as a split, alive."""
+            tab = self.active_tab()
+            if tab is None or target is None or target is self:
+                return
+            pane = tab.active_pane()
+            if pane is None:
+                return
+            detached = tab.detach_pane(pane.pane_id)
+            if detached is None:
+                return
+            target_tab = target.active_tab()
+            if target_tab is None:
+                target._adopt_pane_new_tab(detached)
+            else:
+                target_tab.adopt_pane(detached)
+            target.present()
+
+        def show_send_pane_picker(self):
+            """Pick which open window to send the active pane to (or a new
+            one)."""
+            others = [w for w in (self._app.get_windows() or [])
+                      if isinstance(w, NativeTerminalWindow) and w is not self]
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Send Pane To")
+            dialog.set_default_size(360, 260)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+
+            def choose(target):
+                dialog.close()
+                if target is None:
+                    self.eject_active_pane()
+                else:
+                    self.send_active_pane_to(target)
+
+            new_btn = Gtk.Button(label="＋ New window")
+            new_btn.connect("clicked", lambda *_: choose(None))
+            box.append(new_btn)
+            for window in others:
+                title = window.get_title() or "Terminal"
+                button = Gtk.Button(label=title)
+                button.connect("clicked",
+                               lambda _b, w=window: choose(w))
+                box.append(button)
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: dialog.close())
+            close.set_halign(Gtk.Align.END)
+            box.append(close)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        # -- naming: manual + LLM-suggested (copilot Phase D) ----------------
+
+        def _prompt_text(self, title, initial, on_apply, apply_label="Rename"):
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title(title)
+            dialog.set_default_size(360, 120)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+            entry = Gtk.Entry()
+            entry.set_text(initial or "")
+            entry.set_hexpand(True)
+
+            def apply():
+                on_apply(entry.get_text())
+                dialog.close()
+
+            entry.connect("activate", lambda *_: apply())
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.set_halign(Gtk.Align.END)
+            cancel = Gtk.Button(label="Cancel")
+            cancel.connect("clicked", lambda *_: dialog.close())
+            ok = Gtk.Button(label=apply_label)
+            ok.add_css_class("suggested-action")
+            ok.connect("clicked", lambda *_: apply())
+            row.append(cancel)
+            row.append(ok)
+            box.append(entry)
+            box.append(row)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+            GLib.idle_add(entry.grab_focus)
+
+        def rename_active_pane(self):
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is None or pane.kind != "terminal":
+                return
+            self._prompt_text("Rename Pane", pane.title,
+                              lambda name: pane.rename(name))
+
+        def rename_current_window(self):
+            self._prompt_text(
+                "Rename Window", self._window_name or self.get_title() or "",
+                self.rename_window)
+
+        def _pane_name_context(self, pane):
+            """A redacted, digested activity block for one pane (for naming)."""
+            journal = getattr(pane, "journal", None)
+            episode = (copilot_episode.current_episode(journal.snapshot())
+                       if journal is not None else None)
+            if episode is not None:
+                block = copilot_askcontext.build_ask_context(
+                    episode, output_mode="digest", budget_chars=800)
+                if block:
+                    return block
+            return pane.title or ""
+
+        def show_name_workspace(self):
+            """Ask the model to name the window + each pane from their
+            activity; show the suggestions as an editable dialog."""
+            tab = self.active_tab()
+            if tab is None:
+                return
+            panes = [p for p in tab.panes.values() if p.kind == "terminal"]
+            if not panes:
+                return
+            chain, eligible = self._resolve_copilot_chain()
+            if not eligible:
+                self._flash_pane(tab.active_pane(),
+                                 "No model available to suggest names")
+                return
+            contexts = [self._pane_name_context(p) for p in panes]
+            llm_cfg = self.options.native_config.assistant.llm
+
+            def work():
+                try:
+                    result = copilot_llm.suggest_names(
+                        llm_cfg, pane_contexts=contexts, chain=chain)
+                    GLib.idle_add(lambda: self._show_name_dialog(panes, result))
+                except copilot_llm.LlmError as exc:
+                    GLib.idle_add(lambda: self._flash_pane(
+                        tab.active_pane(), f"Naming failed: {exc}"))
+
+            self._flash_pane(tab.active_pane(), "Asking the model for names…")
+            threading.Thread(target=work, daemon=True).start()
+
+        def _show_name_dialog(self, panes, result):
+            """Editable review of suggested names — nothing is applied until
+            Apply (suggestions steer, they don't seize)."""
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Name Workspace")
+            dialog.set_default_size(420, 320)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+            names = result.get("panes") or []
+
+            def field(caption, value):
+                box.append(self._name_caption(caption))
+                entry = Gtk.Entry()
+                entry.set_text(value or "")
+                box.append(entry)
+                return entry
+
+            window_entry = field("Window", result.get("window", ""))
+            pane_entries = []
+            for index, pane in enumerate(panes):
+                suggested = names[index] if index < len(names) else pane.title
+                pane_entries.append(field(f"Pane {index + 1} ({pane.title})",
+                                          suggested))
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.set_halign(Gtk.Align.END)
+            cancel = Gtk.Button(label="Cancel")
+            cancel.connect("clicked", lambda *_: dialog.close())
+            apply = Gtk.Button(label="Apply")
+            apply.add_css_class("suggested-action")
+
+            def do_apply():
+                self.rename_window(window_entry.get_text())
+                for pane, entry in zip(panes, pane_entries):
+                    pane.rename(entry.get_text())
+                dialog.close()
+
+            apply.connect("clicked", lambda *_: do_apply())
+            row.append(cancel)
+            row.append(apply)
+            box.append(row)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        def _name_caption(self, text):
+            label = Gtk.Label(label=text)
+            label.set_xalign(0.0)
+            label.add_css_class("dim-label")
+            return label
+
+        def _insert_session_command(self, dialog, row):
+            summary = getattr(row, "_session", None)
+            if summary is None or not summary.last_command:
+                return
+            dialog.close()
+            self.insert_into_active_terminal(summary.last_command)
 
     class NativeTerminalApplication(Gtk.Application):
         def __init__(self, options):
@@ -3058,6 +5642,19 @@ def build_native_classes(g):
             self.control_socket_path = (options.control_socket_path
                                         or default_control_socket_path())
             self._socket_server = None
+            self.session_store = self._make_session_store()
+
+        def _make_session_store(self):
+            assistant = self.options.native_config.assistant
+            if not (assistant.enabled and assistant.sessions.enabled):
+                return None
+            try:
+                store = copilot_sessions.SessionStore(
+                    copilot_sessions.default_base_dir())
+                store.sweep(assistant.sessions.retention_days, time.time())
+                return store
+            except Exception:
+                return None
 
         def do_startup(self):
             Gtk.Application.do_startup(self)
@@ -3080,17 +5677,26 @@ def build_native_classes(g):
             window.present()
 
         def do_shutdown(self):
+            for window in list(self.get_windows() or []):
+                if isinstance(window, NativeTerminalWindow):
+                    window.flush_all_sessions()
             if self._socket_server is not None:
                 self._socket_server.close()
                 self._socket_server = None
             Gtk.Application.do_shutdown(self)
 
+        def new_window(self):
+            """Create, present, and return a fresh window (starts with one
+            default terminal tab)."""
+            window = NativeTerminalWindow(self, self.options)
+            window.present()
+            return window
+
         def _on_app_action(self, action, parameter, name):
             if name == "quit":
                 self.quit()
             elif name == "new-window":
-                window = NativeTerminalWindow(self, self.options)
-                window.present()
+                self.new_window()
 
         def _dispatch_control(self, message):
             # Socket messages arrive on a daemon thread; hop to GTK.

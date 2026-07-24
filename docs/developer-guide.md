@@ -70,7 +70,28 @@ remove, focus, resize, balance, swap, move, boundary hit-test, focused-fit, pixe
 minimums), Markdown/image helpers, action names, and shortcut contracts. It also
 contains **source guardrails** that assert architectural rules (see below).
 `tests/test_tui_navigation.py` covers the curses picker and the control-socket
-payload shape.
+payload shape. `tests/test_tui_core.py` covers the shared entry model and
+directory scanner, and `tests/test_smart_ls.py` covers the smart-ls pure core
+(truncation math, grid geometry, sorting, formatting, state transitions, the
+open plan). `tests/test_copilot_core.py` covers the copilot pure core (assistant
+config parsing, secret redaction, the command journal state machine, and the
+shell-integration wrap-argv decision + snippet guardrails).
+`tests/test_copilot_sessions.py` covers the P1 core (title inference and
+damping, session meaningfulness, exclusions, the heuristic summary, and the
+on-disk session store round-trip, listing, and retention sweep).
+`tests/test_copilot_suggest.py` covers the P2 core (fuzzy scoring, the risk
+classifier against the design-doc examples, recipe metadata and search, and the
+suggestion merge/rank/insert-plan logic). `tests/test_copilot_auth.py` and
+`tests/test_copilot_llm.py` cover the P5 LLM chain with a fake server:
+auth.json parsing and locality tiering, that the internet tier is untouched
+when the opt-in is off (while LAN works without it), local-first fallback and
+model discovery, unconditional redaction, keys staying in the Authorization
+header, and a guardrail that network `urllib` stays confined to `copilot/llm.py`. `tests/test_copilot_prompt.py`
+covers the P4 prompt-line state machine (typing, backspace, control-char/tab/enter
+dirtying, precmd/preexec cycle), and the ghost-completion gate lives in
+`tests/test_copilot_suggest.py`. `tests/test_copilot_context.py` covers the P3
+core (project detection, README extraction, argument expectations and file
+completions, ssh hosts, and typo correction incl. the design-doc 5.5 cases).
 
 Run the unit tests before every commit. They are fast and need no GUI.
 

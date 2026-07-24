@@ -3,3 +3,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Local credentials (never commit)
+auth.json
+*.auth.json
+.env

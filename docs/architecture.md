@@ -83,9 +83,22 @@ top-to-bottom from pure core to GTK shell. The approximate map:
 | GTK class factory | 1326–3052 | `load_gtk`, `build_native_classes`, all widget classes |
 | Entry point | 3056–3078 | `create_application`, `main` |
 
-`tui_navigation.py` is a separate, self-contained curses file picker plus the
-client side of the control protocol (`send_control_message`). It is run as a
-child process, not imported by the GTK shell.
+The curses tools live beside the GTK module and are run as child processes,
+never imported by the GTK shell. Their shared pure layer — `PickerEntry`,
+directory scanning/listing, and the client side of the control protocol
+(`send_control_message`) — sits in `tui_core.py` (GTK-free and curses-free).
+`tui_navigation.py` is the file picker the app spawns for Ctrl+Shift+O;
+`smart_ls.py` is the standalone `sls` directory browser
+([smart-ls.md](smart-ls.md)), which talks back to the app only through the
+control socket.
+
+The `agent_terminal/copilot/` package holds the terminal copilot's pure core
+(config, redaction, the per-pane command journal, shell-integration decisions;
+[copilot.md](copilot.md)). It is GTK-free and follows a one-way import rule —
+`native_terminal` imports `copilot.*`, never the reverse (ADR
+[0005](decisions/0005-copilot-pure-core-package.md)). The GTK module contributes
+only thin wiring: an `assistant` config section, rcfile injection at spawn, and
+the termprop signal handler that feeds the journal.
 
 ## The layout engine (pure)
 

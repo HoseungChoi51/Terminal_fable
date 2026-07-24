@@ -12,10 +12,14 @@ dependencies = []
 
 [project.scripts]
 agent-terminal-native = "agent_terminal.native_terminal:main"
+sls = "agent_terminal.smart_ls:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agent_terminal"]
+packages = ["agent_terminal", "agent_terminal.copilot"]
+
+[tool.setuptools.package-data]
+"agent_terminal.copilot" = ["shell/*.bash"]
