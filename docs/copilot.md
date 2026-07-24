@@ -61,6 +61,13 @@ built on the journal:
   `assistant.workspace` (`min_pane_cols`/`min_pane_rows`,
   `max_panes_per_window`, `job_gap_minutes`, `revert_seconds`).
 
+- *Moving panes between windows.* When a workflow diverges, regroup by
+  hand: **Alt+Shift+E** (*View → Eject Pane to New Window*) moves the
+  active pane out into its own window, and **Alt+Shift+G** (*Send Pane to
+  Window…*) moves it into another open window as a split. The move is
+  **live** — the running shell, its process, and the scrollback come with
+  it; nothing is re-spawned.
+
 **Phase P2 — command menu (shipped).** Press **Ctrl+Shift+Space** to
 open a command menu at the cursor: a searchable, ranked list of
 built-in recipes and commands from your own history, each tagged with a

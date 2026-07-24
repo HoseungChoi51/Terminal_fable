@@ -1261,6 +1261,7 @@ ACTION_NAMES = (
     "zoom-in", "zoom-out", "zoom-reset",
     "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
     "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
+    "pane-eject", "pane-send",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -1306,6 +1307,8 @@ ACCELERATORS = {
     "copilot-ask": ("<Ctrl>question", "<Ctrl><Shift>slash"),
     "copilot-model": ("<Ctrl><Shift>m",),
     "copilot-digest-mode": ("<Ctrl><Shift>d",),
+    "pane-eject": ("<Alt><Shift>e",),
+    "pane-send": ("<Alt><Shift>g",),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1"),
@@ -1779,6 +1782,7 @@ def build_native_classes(g):
             self.settings = settings
             self.tint = normalize_tint(tint)
             self.assistant = assistant
+            self.pid = None
             self.journal = None
             self._termprop_events = []
             self._flush_id = None
@@ -1963,6 +1967,7 @@ def build_native_classes(g):
                     self._on_spawned, None)
 
         def _on_spawned(self, terminal, pid, error, *user_data):
+            self.pid = pid if error is None else None
             if error is not None:
                 self._feed_message(f"spawn failed: {error}")
 
@@ -2892,6 +2897,50 @@ def build_native_classes(g):
             click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             click.connect("pressed", self._on_pane_pressed, pane.pane_id)
             pane.widget.add_controller(click)
+            # Kept so a live move to another tab can drop this tab's click
+            # handler before the target tab installs its own.
+            pane._tab_click = click
+
+        def detach_pane(self, pane_id):
+            """Remove a pane from this tab WITHOUT disposing it, for a live
+            move to another window. Returns the pane (or None). The child
+            process and scrollback are untouched — only the widget is
+            unparented and the tab's layout/bookkeeping updated."""
+            pane = self.panes.get(pane_id)
+            if pane is None:
+                return None
+            controller = getattr(pane, "_tab_click", None)
+            if controller is not None:
+                try:
+                    pane.widget.remove_controller(controller)
+                except Exception:
+                    pass
+                pane._tab_click = None
+            pane.on_title_changed = None
+            self.panes.pop(pane_id, None)
+            self.push_history()
+            self.fit_focused_root = None
+            self.root = layout_remove_leaf(self.root, pane_id,
+                                           self.window.close_policy)
+            self.container.remove_pane(pane_id)
+            self._prune_history()
+            if self.root is None:
+                # emptied the tab -> drop it (may close an emptied window)
+                self.window.remove_tab(self)
+                return pane
+            if self.active_pane_id not in self.panes:
+                ids = layout_leaf_ids(self.root)
+                if ids:
+                    self.set_active(ids[0])
+            self._sync()
+            return pane
+
+        def adopt_pane(self, pane, orientation=HORIZONTAL):
+            """Take in a pane detached from another tab, splitting the active
+            pane. Rebinds the pane's window-scoped callback so exit/close route
+            to this window."""
+            pane.on_exited = self.window._on_pane_exited
+            self.add_pane(pane, orientation)
 
         def _on_pane_pressed(self, gesture, n_press, x, y, pane_id):
             # Viewers take keyboard focus on click so scroll/zoom keys
@@ -3308,6 +3357,8 @@ def build_native_classes(g):
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
             view.append("Ask Copilot…", "win.copilot-ask")
+            view.append("Eject Pane to New Window", "win.pane-eject")
+            view.append("Send Pane to Window…", "win.pane-send")
             view.append("Copilot Model", "win.copilot-model")
             view.append("Toggle Context Mode", "win.copilot-digest-mode")
             view.append("Session Summary…", "win.copilot-summary")
@@ -4093,6 +4144,10 @@ def build_native_classes(g):
                 self.show_model_picker()
             elif name == "copilot-digest-mode":
                 self.toggle_copilot_digest_mode()
+            elif name == "pane-eject":
+                self.eject_active_pane()
+            elif name == "pane-send":
+                self.show_send_pane_picker()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -5304,6 +5359,94 @@ def build_native_classes(g):
                 f"Opened {total} panes as “{job.title or 'workspace'}”{where}"
                 " — Keep or Revert?",
                 on_revert=lambda: [w.close() for w in created])
+
+        # -- moving panes between windows, live (copilot Phase C) ------------
+
+        def _adopt_pane_new_tab(self, pane, drop_default=False):
+            """Install a pane (detached from elsewhere) as a new tab here. With
+            drop_default, remove the tabs the window opened with so it holds
+            only the moved pane."""
+            pane.on_exited = self._on_pane_exited
+            existing = list(self.tabs) if drop_default else []
+            tab = TerminalTab(self, pane)
+            self._append_tab(tab)
+            for old in existing:
+                self.remove_tab(old)
+            return tab
+
+        def eject_active_pane(self):
+            """Move the active pane out into a new window, alive (keeps its
+            process + scrollback)."""
+            tab = self.active_tab()
+            if tab is None:
+                return
+            if tab.pane_count() <= 1 and len(self.tabs) <= 1:
+                self._flash_pane(tab.active_pane(),
+                                 "Only pane here — nothing to eject")
+                return
+            pane = tab.active_pane()
+            detached = tab.detach_pane(pane.pane_id)
+            if detached is None:
+                return
+            target = self._app.new_window()
+            target._adopt_pane_new_tab(detached, drop_default=True)
+            target.present()
+
+        def send_active_pane_to(self, target):
+            """Move the active pane into another window as a split, alive."""
+            tab = self.active_tab()
+            if tab is None or target is None or target is self:
+                return
+            pane = tab.active_pane()
+            if pane is None:
+                return
+            detached = tab.detach_pane(pane.pane_id)
+            if detached is None:
+                return
+            target_tab = target.active_tab()
+            if target_tab is None:
+                target._adopt_pane_new_tab(detached)
+            else:
+                target_tab.adopt_pane(detached)
+            target.present()
+
+        def show_send_pane_picker(self):
+            """Pick which open window to send the active pane to (or a new
+            one)."""
+            others = [w for w in (self._app.get_windows() or [])
+                      if isinstance(w, NativeTerminalWindow) and w is not self]
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Send Pane To")
+            dialog.set_default_size(360, 260)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+
+            def choose(target):
+                dialog.close()
+                if target is None:
+                    self.eject_active_pane()
+                else:
+                    self.send_active_pane_to(target)
+
+            new_btn = Gtk.Button(label="＋ New window")
+            new_btn.connect("clicked", lambda *_: choose(None))
+            box.append(new_btn)
+            for window in others:
+                title = window.get_title() or "Terminal"
+                button = Gtk.Button(label=title)
+                button.connect("clicked",
+                               lambda _b, w=window: choose(w))
+                box.append(button)
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: dialog.close())
+            close.set_halign(Gtk.Align.END)
+            box.append(close)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
 
         def _insert_session_command(self, dialog, row):
             summary = getattr(row, "_session", None)

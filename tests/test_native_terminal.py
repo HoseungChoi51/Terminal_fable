@@ -790,6 +790,28 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_live_pane_move_wired(self):
+        # Moving a pane between windows must reparent it alive: detach without
+        # disposing (that would kill the process), then adopt with rebound
+        # window callbacks.
+        self.assertIn("def detach_pane(self, pane_id)", SOURCE)
+        self.assertIn("def adopt_pane(self, pane, orientation=HORIZONTAL)",
+                      SOURCE)
+        self.assertIn("def eject_active_pane(self)", SOURCE)
+        self.assertIn("def send_active_pane_to(self, target)", SOURCE)
+        self.assertIn("pane-eject", nt.ACTION_NAMES)
+        self.assertIn("pane-send", nt.ACTION_NAMES)
+        self.assertIn("<Alt><Shift>e", nt.ACCELERATORS["pane-eject"])
+        # detach unparents the widget but never disposes the pane
+        detach = SOURCE.split("def detach_pane(self, pane_id):", 1)[1] \
+            .split("def adopt_pane", 1)[0]
+        self.assertIn("self.container.remove_pane(pane_id)", detach)
+        self.assertNotIn("pane.dispose()", detach)
+        # adopt rebinds the window-scoped exit callback to the new window
+        self.assertIn("pane.on_exited = self.window._on_pane_exited", SOURCE)
+        # the tab-click controller is tracked so a move can swap it out
+        self.assertIn("pane._tab_click = click", SOURCE)
+
     def test_workspace_job_restore_wired(self):
         # Detected jobs restore as one bounded split-pane window (packing),
         # with an act-then-revert bar (auto-revert timer + Keep/Revert).
