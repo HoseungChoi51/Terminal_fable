@@ -397,6 +397,44 @@ class PrivacyFallbackTests(unittest.TestCase):
         self.assertNotIn("should-not-appear", sent)     # recent_commands dropped
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)  # re-redacted at choke
 
+    def test_full_path_never_leaks_raw_secrets_in_any_mode(self):
+        # Adversarial end-to-end: raw output carrying real secrets goes
+        # through the same steps as the live path — redact_lines (as in
+        # journal._finalize) -> digest -> askcontext -> build_context/send —
+        # for every send_output mode. Nothing sensitive may survive, yet the
+        # error line must (context stays useful).
+        from types import SimpleNamespace
+        from agent_terminal.copilot import (askcontext, digest as digest_mod,
+                                             episode, redact)
+        raw = ([f"building step {i}" for i in range(30)] + [
+            "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+            "export API_KEY=hunter2supersecretvalue",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWy",
+            "-----END RSA PRIVATE KEY-----",
+        ] + ["error: compilation failed at src/main.rs:9"])
+        needles = ["sk-ABCDEF", "AKIAIOSFODNN7EXAMPLE", "hunter2supersecret",
+                   "MIIEpAIBAAKCAQEA", "PRIVATE KEY"]
+        red, _ = redact.redact_lines(raw)         # journal._finalize step
+        record = SimpleNamespace(
+            seq=0, cmd="cargo build", cwd="/home/x/proj", started_at=1000.0,
+            duration_s=1.0, exit_code=101, output_tail=tuple(red[-20:]),
+            digest=digest_mod.digest_output(red), branch=None)
+        ep = episode.current_episode([record])
+        for mode in ("none", "digest", "full"):
+            activity = askcontext.build_ask_context(
+                ep, question="why did the build fail?", output_mode=mode)
+            server = FakeServer(content='{"commands":[]}')
+            cllm.suggest_commands(
+                _cfg(allow_remote_context=True), query="why fail?",
+                activity=activity, chain=[LAN1], opener=server)
+            sent = json.dumps(server.chat_bodies()[0])
+            for needle in needles:
+                self.assertNotIn(needle, sent, f"{needle!r} leaked in {mode}")
+            if mode != "none":
+                self.assertIn("compilation failed", sent)  # useful context kept
+
     def test_project_and_draft_and_query_redacted(self):
         server = FakeServer(content='{"commands":[]}')
         cllm.suggest_commands(
