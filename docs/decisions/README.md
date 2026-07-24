@@ -26,3 +26,4 @@ mark the old one `Superseded by NNNN`.
 | [0008](0008-llm-provider-and-remote-gate.md) | LLM provider: OpenAI-compatible, behind a gated redacting choke point | Accepted |
 | [0009](0009-session-persistence-format.md) | Session persistence: a directory per session under the XDG data dir | Accepted |
 | [0010](0010-in-place-ask-mode.md) | In-place ask mode instead of an assistant side panel | Accepted |
+| [0011](0011-workspaces-and-live-pane-moves.md) | Workspaces: episode resume, job grouping, live pane moves, naming | Accepted |

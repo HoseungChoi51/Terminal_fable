@@ -68,6 +68,14 @@ built on the journal:
   **live** — the running shell, its process, and the scrollback come with
   it; nothing is re-spawned.
 
+- *Naming windows and panes.* Multi-pane windows get hard to read, so you
+  can name them. **F2** (*View → Rename Pane…*) names the active pane, and
+  *Rename Window…* names the window; a manual name overrides the
+  journal-inferred title and sticks. *Name Workspace (AI)…* asks the model
+  to suggest a window name and a name for each pane from its recent
+  activity (the redacted digest, not raw output) — the suggestions open in
+  an **editable** dialog and are applied only when you click Apply.
+
 **Phase P2 — command menu (shipped).** Press **Ctrl+Shift+Space** to
 open a command menu at the cursor: a searchable, ranked list of
 built-in recipes and commands from your own history, each tagged with a

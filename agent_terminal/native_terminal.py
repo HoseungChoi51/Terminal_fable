@@ -1261,7 +1261,7 @@ ACTION_NAMES = (
     "zoom-in", "zoom-out", "zoom-reset",
     "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
     "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
-    "pane-eject", "pane-send",
+    "pane-eject", "pane-send", "pane-rename", "window-rename", "workspace-name",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -1309,6 +1309,7 @@ ACCELERATORS = {
     "copilot-digest-mode": ("<Ctrl><Shift>d",),
     "pane-eject": ("<Alt><Shift>e",),
     "pane-send": ("<Alt><Shift>g",),
+    "pane-rename": ("F2",),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1"),
@@ -1783,6 +1784,7 @@ def build_native_classes(g):
             self.tint = normalize_tint(tint)
             self.assistant = assistant
             self.pid = None
+            self._name_override = None   # manual/LLM pane name; wins over auto
             self.journal = None
             self._termprop_events = []
             self._flush_id = None
@@ -2062,7 +2064,8 @@ def build_native_classes(g):
             # boilerplate and is ignored so the inferred title stands.
             if self._pending_title is not None:
                 title, self._pending_title = self._pending_title, None
-                if (title and self.journal is not None
+                if (title and self._name_override is None
+                        and self.journal is not None
                         and self.journal.state == "executing"):
                     self.title = title
                     self._notify_title()
@@ -2307,10 +2310,23 @@ def build_native_classes(g):
                 self._pending_title = vte_title
                 self._schedule_flush()
                 return
+            if self._name_override is not None:
+                return
             self.title = vte_title or "Terminal"
             self._notify_title()
 
+        def rename(self, name):
+            """Give this pane a manual/LLM name that overrides the inferred
+            title (empty clears it, restoring the automatic title)."""
+            name = (name or "").strip()
+            self._name_override = name or None
+            if name:
+                self.title = name
+            self._notify_title()
+
         def _maybe_update_title(self):
+            if self._name_override is not None:
+                return
             if self._title_policy is None or self.journal is None:
                 return
             candidate = copilot_titles.infer_title(
@@ -3297,6 +3313,7 @@ def build_native_classes(g):
             self._model_dialog = None
             self._sessions_dialog = None
             self._revert_token = None          # identity of the open revert bar
+            self._window_name = None           # manual/LLM window name
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3357,6 +3374,9 @@ def build_native_classes(g):
             view.append("Cycle Pane Color", "win.cycle-pane-tint")
             view.append("Command Menu…", "win.copilot-menu")
             view.append("Ask Copilot…", "win.copilot-ask")
+            view.append("Rename Pane…", "win.pane-rename")
+            view.append("Rename Window…", "win.window-rename")
+            view.append("Name Workspace (AI)…", "win.workspace-name")
             view.append("Eject Pane to New Window", "win.pane-eject")
             view.append("Send Pane to Window…", "win.pane-send")
             view.append("Copilot Model", "win.copilot-model")
@@ -3703,7 +3723,17 @@ def build_native_classes(g):
             if isinstance(label, Gtk.Label):
                 label.set_text(tab.title or "Terminal")
             if tab is self.active_tab():
-                self.set_title(self.options.title or tab.title or APP_TITLE)
+                self.set_title(self._window_name or self.options.title
+                               or tab.title or APP_TITLE)
+
+        def rename_window(self, name):
+            """A manual/LLM window name (empty clears it)."""
+            self._window_name = (name or "").strip() or None
+            tab = self.active_tab()
+            if tab is not None:
+                self.update_tab_title(tab)
+            elif self._window_name:
+                self.set_title(self._window_name)
 
         def active_tab(self):
             page = self.notebook.get_current_page()
@@ -4148,6 +4178,12 @@ def build_native_classes(g):
                 self.eject_active_pane()
             elif name == "pane-send":
                 self.show_send_pane_picker()
+            elif name == "pane-rename":
+                self.rename_active_pane()
+            elif name == "window-rename":
+                self.rename_current_window()
+            elif name == "workspace-name":
+                self.show_name_workspace()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -5447,6 +5483,149 @@ def build_native_classes(g):
             dialog.set_child(box)
             self._close_on_escape(dialog)
             dialog.present()
+
+        # -- naming: manual + LLM-suggested (copilot Phase D) ----------------
+
+        def _prompt_text(self, title, initial, on_apply, apply_label="Rename"):
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title(title)
+            dialog.set_default_size(360, 120)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+            entry = Gtk.Entry()
+            entry.set_text(initial or "")
+            entry.set_hexpand(True)
+
+            def apply():
+                on_apply(entry.get_text())
+                dialog.close()
+
+            entry.connect("activate", lambda *_: apply())
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.set_halign(Gtk.Align.END)
+            cancel = Gtk.Button(label="Cancel")
+            cancel.connect("clicked", lambda *_: dialog.close())
+            ok = Gtk.Button(label=apply_label)
+            ok.add_css_class("suggested-action")
+            ok.connect("clicked", lambda *_: apply())
+            row.append(cancel)
+            row.append(ok)
+            box.append(entry)
+            box.append(row)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+            GLib.idle_add(entry.grab_focus)
+
+        def rename_active_pane(self):
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is None or pane.kind != "terminal":
+                return
+            self._prompt_text("Rename Pane", pane.title,
+                              lambda name: pane.rename(name))
+
+        def rename_current_window(self):
+            self._prompt_text(
+                "Rename Window", self._window_name or self.get_title() or "",
+                self.rename_window)
+
+        def _pane_name_context(self, pane):
+            """A redacted, digested activity block for one pane (for naming)."""
+            journal = getattr(pane, "journal", None)
+            episode = (copilot_episode.current_episode(journal.snapshot())
+                       if journal is not None else None)
+            if episode is not None:
+                block = copilot_askcontext.build_ask_context(
+                    episode, output_mode="digest", budget_chars=800)
+                if block:
+                    return block
+            return pane.title or ""
+
+        def show_name_workspace(self):
+            """Ask the model to name the window + each pane from their
+            activity; show the suggestions as an editable dialog."""
+            tab = self.active_tab()
+            if tab is None:
+                return
+            panes = [p for p in tab.panes.values() if p.kind == "terminal"]
+            if not panes:
+                return
+            chain, eligible = self._resolve_copilot_chain()
+            if not eligible:
+                self._flash_pane(tab.active_pane(),
+                                 "No model available to suggest names")
+                return
+            contexts = [self._pane_name_context(p) for p in panes]
+            llm_cfg = self.options.native_config.assistant.llm
+
+            def work():
+                try:
+                    result = copilot_llm.suggest_names(
+                        llm_cfg, pane_contexts=contexts, chain=chain)
+                    GLib.idle_add(lambda: self._show_name_dialog(panes, result))
+                except copilot_llm.LlmError as exc:
+                    GLib.idle_add(lambda: self._flash_pane(
+                        tab.active_pane(), f"Naming failed: {exc}"))
+
+            self._flash_pane(tab.active_pane(), "Asking the model for names…")
+            threading.Thread(target=work, daemon=True).start()
+
+        def _show_name_dialog(self, panes, result):
+            """Editable review of suggested names — nothing is applied until
+            Apply (suggestions steer, they don't seize)."""
+            dialog = Gtk.Window()
+            dialog.set_transient_for(self)
+            dialog.set_modal(True)
+            dialog.set_title("Name Workspace")
+            dialog.set_default_size(420, 320)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            for margin in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{margin}")(12)
+            names = result.get("panes") or []
+
+            def field(caption, value):
+                box.append(self._name_caption(caption))
+                entry = Gtk.Entry()
+                entry.set_text(value or "")
+                box.append(entry)
+                return entry
+
+            window_entry = field("Window", result.get("window", ""))
+            pane_entries = []
+            for index, pane in enumerate(panes):
+                suggested = names[index] if index < len(names) else pane.title
+                pane_entries.append(field(f"Pane {index + 1} ({pane.title})",
+                                          suggested))
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.set_halign(Gtk.Align.END)
+            cancel = Gtk.Button(label="Cancel")
+            cancel.connect("clicked", lambda *_: dialog.close())
+            apply = Gtk.Button(label="Apply")
+            apply.add_css_class("suggested-action")
+
+            def do_apply():
+                self.rename_window(window_entry.get_text())
+                for pane, entry in zip(panes, pane_entries):
+                    pane.rename(entry.get_text())
+                dialog.close()
+
+            apply.connect("clicked", lambda *_: do_apply())
+            row.append(cancel)
+            row.append(apply)
+            box.append(row)
+            dialog.set_child(box)
+            self._close_on_escape(dialog)
+            dialog.present()
+
+        def _name_caption(self, text):
+            label = Gtk.Label(label=text)
+            label.set_xalign(0.0)
+            label.add_css_class("dim-label")
+            return label
 
         def _insert_session_command(self, dialog, row):
             summary = getattr(row, "_session", None)

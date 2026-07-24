@@ -256,6 +256,37 @@ class LlmDigestTests(unittest.TestCase):
         self.assertEqual(server.requests, [])   # no call made
 
 
+class SuggestNamesTests(unittest.TestCase):
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_returns_window_and_pane_names(self):
+        server = FakeServer(
+            content='{"window":"myapp","panes":["server","tests"]}')
+        out = cllm.suggest_names(
+            _cfg(allow_remote_context=True),
+            pane_contexts=["cargo run", "pytest -x"],
+            chain=[LAN1], opener=server)
+        self.assertEqual(out["window"], "myapp")
+        self.assertEqual(out["panes"], ["server", "tests"])
+
+    def test_pane_context_is_redacted_before_send(self):
+        server = FakeServer(content='{"window":"x","panes":["a"]}')
+        cllm.suggest_names(
+            _cfg(allow_remote_context=True),
+            pane_contexts=["export TOKEN=AKIAIOSFODNN7EXAMPLE"],
+            chain=[LAN1], opener=server)
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sent)
+
+    def test_empty_makes_no_call(self):
+        server = FakeServer()
+        out = cllm.suggest_names(_cfg(allow_remote_context=True),
+                                 pane_contexts=[], chain=[LAN1], opener=server)
+        self.assertEqual(out, {"window": "", "panes": []})
+        self.assertEqual(server.requests, [])
+
+
 class ListModelsTests(unittest.TestCase):
     def test_lists_all_advertised_models(self):
         server = FakeServer(models=("hulk", "loki"))

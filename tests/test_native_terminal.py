@@ -790,6 +790,28 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_naming_wired(self):
+        # Manual rename + LLM name suggestions; a name overrides the inferred
+        # title, and the naming context is the redacted digest (not raw).
+        self.assertIn("def rename(self, name):", SOURCE)              # pane
+        self.assertIn("def rename_window(self, name):", SOURCE)
+        self.assertIn("def rename_active_pane(self)", SOURCE)
+        self.assertIn("def show_name_workspace(self)", SOURCE)
+        self.assertIn("copilot_llm.suggest_names(", SOURCE)
+        self.assertIn("pane-rename", nt.ACTION_NAMES)
+        self.assertIn("window-rename", nt.ACTION_NAMES)
+        self.assertIn("workspace-name", nt.ACTION_NAMES)
+        self.assertIn("F2", nt.ACCELERATORS["pane-rename"])
+        # the manual/LLM name wins over the inferred title in every setter
+        # (the copilot-inferred path, the VTE-title path, and the flush path)
+        self.assertGreaterEqual(
+            SOURCE.count("if self._name_override is not None:"), 2)
+        self.assertIn("and self._name_override is None", SOURCE)
+        # naming feeds the model the redacted digest, not raw output
+        self.assertIn('output_mode="digest", budget_chars=800', SOURCE)
+        # suggestions are applied only from the Apply button (never silently)
+        self.assertIn("def _show_name_dialog(self, panes, result)", SOURCE)
+
     def test_live_pane_move_wired(self):
         # Moving a pane between windows must reparent it alive: detach without
         # disposing (that would kill the process), then adopt with rebound

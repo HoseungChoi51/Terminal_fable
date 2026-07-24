@@ -246,6 +246,44 @@ def explain_messages(command, suffix=""):
             {"role": "user", "content": _redact_multiline(command)}]
 
 
+_NAMING_SYSTEM = (
+    "You label a terminal workspace. You are given several panes, each with "
+    "its recent activity. Reply with a short name for the overall window "
+    "(the project or job) and a short name for each pane (what it is doing — "
+    'e.g. "server", "tests", "db shell"). Reply with ONLY a JSON object: '
+    '{"window": "<name>", "panes": ["<name>", ...]} with exactly one pane '
+    "name per pane, in order. Keep every name 1-3 words. No markdown."
+)
+
+
+def naming_messages(pane_contexts, suffix=""):
+    blocks = []
+    for index, context in enumerate(pane_contexts, start=1):
+        body = _redact_multiline(str(context)).strip() or "(idle)"
+        blocks.append(f"[pane {index}]\n{body}")
+    return [{"role": "system", "content": _system(_NAMING_SYSTEM, suffix)},
+            {"role": "user", "content": "\n\n".join(blocks)}]
+
+
+def suggest_names(config, *, pane_contexts, chain=None, opener=None) -> dict:
+    """Suggest a window name + a name per pane from each pane's (already-
+    redacted) activity context. Returns {"window": str, "panes": [str, ...]}.
+    Raises LlmError if no endpoint is eligible or the call fails."""
+    if not pane_contexts:
+        return {"window": "", "panes": []}
+    text, _ = _run_chain(
+        config, naming_messages(pane_contexts, config.system_suffix),
+        json_mode=True, chain=chain, opener=opener)
+    data = _loads_lenient(text)
+    if not isinstance(data, dict):
+        return {"window": "", "panes": []}
+    raw = data.get("panes")
+    names = ([_redact_multiline(str(n)).strip() for n in raw]
+             if isinstance(raw, list) else [])
+    return {"window": _redact_multiline(str(data.get("window", ""))).strip(),
+            "panes": names}
+
+
 def output_digest_messages(command, output, question, suffix=""):
     body = (f"Command: {_redact_multiline(command)}\n"
             f"Question: {_redact_multiline(question)}\n\n"
