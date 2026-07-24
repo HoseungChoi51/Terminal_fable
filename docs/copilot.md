@@ -31,11 +31,22 @@ built on the journal:
 - *Session history.* When a meaningful session ends (roughly: three or
   more non-trivial commands, or one that ran a while), it is saved to
   disk. Press **Ctrl+Shift+S** — or **View → Session History…** — to
-  browse past sessions. *Restore* opens a new tab in the session's last
-  directory alongside a markdown summary of what you did; *Insert last
-  command* types that session's last command into the current terminal
-  (without running it). A trivial session (a couple of `ls`es and an
-  `exit`) is not stored.
+  browse past sessions. *Restore* reopens the session's most recent
+  **episode** — a terminal in that episode's directory with **just that
+  episode's commands seeded into shell history** (↑ recalls them; nothing
+  runs) — alongside a markdown summary. Expand a session's *episodes* to
+  resume an earlier stretch instead. *Insert last command* types that
+  session's last command into the current terminal (without running it). A
+  trivial session (a couple of `ls`es and an `exit`) is not stored.
+
+  The seed is loaded into the restored pane by the shell-integration
+  wrapper (`AGENT_TERMINAL_SEED_HISTFILE`); it points `HISTFILE` at a
+  private temp file, so a restored pane **never writes into your global
+  `~/.bash_history`**. Seeded commands are the redacted forms that were
+  stored, so a secret-bearing command recalls as `… [REDACTED]`. (If you
+  use a history manager that rebinds ↑, such as atuin, recall still works
+  through bash's own history — `builtin history` — but your manager's own
+  search is not seeded.)
 
 **Phase P2 — command menu (shipped).** Press **Ctrl+Shift+Space** to
 open a command menu at the cursor: a searchable, ranked list of

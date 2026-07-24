@@ -12,6 +12,24 @@
 
 [ -n "${BASH_VERSION:-}" ] || return 0
 [[ $- == *i* ]] || return 0
+
+# Restored-episode history seed. When the app opens a "resume" pane it points
+# AGENT_TERMINAL_SEED_HISTFILE at a temp file holding just that episode's
+# commands. Load them so up-arrow recalls the episode, and relocate HISTFILE
+# onto that temp file so this restored pane never writes into the user's
+# global ~/.bash_history. `history -c` first, so only the episode is recalled
+# (not the whole loaded history); combined with the HISTFILE relocation this
+# is correct whether bash loaded its history before or after this rcfile.
+# (Runs before the NO_INTEGRATION / already-installed guards: seeding is
+# independent of command journaling.)
+if [ -n "${AGENT_TERMINAL_SEED_HISTFILE:-}" ] \
+        && [ -f "${AGENT_TERMINAL_SEED_HISTFILE}" ]; then
+    builtin history -c
+    builtin history -r "${AGENT_TERMINAL_SEED_HISTFILE}"
+    HISTFILE="${AGENT_TERMINAL_SEED_HISTFILE}"
+    unset AGENT_TERMINAL_SEED_HISTFILE
+fi
+
 [ -z "${AGENT_TERMINAL_NO_INTEGRATION:-}" ] || return 0
 [ -z "${_agentterm_installed:-}" ] || return 0
 _agentterm_installed=1

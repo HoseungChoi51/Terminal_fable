@@ -44,6 +44,7 @@ from agent_terminal.copilot import typo as copilot_typo
 from agent_terminal.copilot import ask as copilot_ask
 from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
+from agent_terminal.copilot import resume as copilot_resume
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -3241,6 +3242,7 @@ def build_native_classes(g):
             self._pinned_model = None     # model chosen via the picker
             self._digest_mode_override = None  # A/B toggle over llm.digest_mode
             self._model_dialog = None
+            self._sessions_dialog = None
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3565,7 +3567,8 @@ def build_native_classes(g):
         # -- pane factories -------------------------------------------------
 
         def create_terminal_pane(self, command=None, working_directory=None,
-                                 hold_on_exit=False, title=None):
+                                 hold_on_exit=False, title=None,
+                                 extra_env=None):
             return TerminalPane(
                 self.options.settings, command=command,
                 working_directory=(working_directory
@@ -3574,6 +3577,7 @@ def build_native_classes(g):
                 control_socket_path=self._app.control_socket_path,
                 on_exited=self._on_pane_exited, title=title,
                 tint=self._next_tint_slot(),
+                extra_env=extra_env,
                 assistant=self.options.native_config.assistant)
 
         def _next_tint_slot(self):
@@ -3609,10 +3613,13 @@ def build_native_classes(g):
         # -- tabs -----------------------------------------------------------
 
         def add_terminal_tab(self, command=None, working_directory=None,
-                             hold_on_exit=False, title=None):
+                             hold_on_exit=False, title=None, extra_env=None):
             pane = self.create_terminal_pane(command, working_directory,
-                                             hold_on_exit, title)
-            self._append_tab(TerminalTab(self, pane))
+                                             hold_on_exit, title,
+                                             extra_env=extra_env)
+            tab = TerminalTab(self, pane)
+            self._append_tab(tab)
+            return tab
 
         def open_path_in_new_tab(self, path):
             self._append_tab(TerminalTab(self, self.create_viewer_pane(path)))
@@ -4948,6 +4955,9 @@ def build_native_classes(g):
             # Flush current panes first so the just-worked session is listed.
             self.flush_all_sessions()
             dialog = Gtk.Window()
+            self._sessions_dialog = dialog
+            dialog.connect("close-request",
+                           lambda *_: setattr(self, "_sessions_dialog", None))
             dialog.set_transient_for(self)
             dialog.set_modal(True)
             dialog.set_title("Session History")
@@ -5008,19 +5018,97 @@ def build_native_classes(g):
             subtitle.add_css_class("dim-label")
             inner.append(title)
             inner.append(subtitle)
+            # Episodes: lazily segment the stored session on first expand so a
+            # long list isn't loaded up front. Each episode restores on its own
+            # (its own cwd + history seed).
+            expander = Gtk.Expander(label="episodes")
+            expander.add_css_class("dim-label")
+            ep_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            ep_box.set_margin_start(8)
+            ep_box.set_margin_top(4)
+            expander.set_child(ep_box)
+            state = {"loaded": False}
+
+            def on_toggle(*_):
+                if state["loaded"] or not expander.get_expanded():
+                    return
+                state["loaded"] = True
+                store = self._app.session_store
+                record = store.load(summary.id) if store else None
+                episodes = copilot_resume.episodes_of(record) if record else []
+                if not episodes:
+                    ep_box.append(Gtk.Label(label="(no episodes)"))
+                    return
+                for index, episode in enumerate(episodes):
+                    ep_box.append(self._episode_row(summary, index, episode))
+
+            expander.connect("notify::expanded", on_toggle)
+            inner.append(expander)
             row.set_child(inner)
             return row
+
+        def _episode_row(self, summary, index, episode):
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            label = Gtk.Label(label=episode.headline())
+            label.set_xalign(0.0)
+            label.set_hexpand(True)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            label.add_css_class("dim-label")
+            button = Gtk.Button(label="Resume")
+            button.add_css_class("flat")
+            button.connect("clicked", lambda *_: self._restore_episode(
+                episode, summary, index, dialog=self._sessions_dialog))
+            box.append(label)
+            box.append(button)
+            return box
+
+        def _write_seed_file(self, episode, tag):
+            """Write an episode's command history to a temp seed file the
+            restored pane's shell loads (AGENT_TERMINAL_SEED_HISTFILE). Returns
+            the path, or None when there is nothing to seed."""
+            content = copilot_resume.seed_file_content(episode)
+            if not content:
+                return None
+            directory = Path(copilot_shell.default_wrapper_dir()) / "seeds"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"seed-{tag}.hist"
+                path.write_text(content, encoding="utf-8")
+            except OSError:
+                return None
+            return str(path)
+
+        def _restore_episode(self, episode, summary, index, dialog=None):
+            """Reopen a terminal in the episode's cwd, with just that episode's
+            commands seeded for up-arrow recall."""
+            cwd = copilot_resume.resume_cwd(episode) or (
+                summary.cwd_last if summary else None)
+            cwd = cwd if cwd and os.path.isdir(cwd) else None
+            tag = f"{getattr(summary, 'id', 'session')}-ep{index}"
+            seed = self._write_seed_file(episode, tag)
+            env = ({"AGENT_TERMINAL_SEED_HISTFILE": seed} if seed else None)
+            self.add_terminal_tab(working_directory=cwd, extra_env=env,
+                                  title=episode.title)
+            if dialog is not None:
+                dialog.close()
 
         def _restore_session(self, dialog, row):
             summary = getattr(row, "_session", None)
             if summary is None:
                 return
             store = self._app.session_store
-            cwd = summary.cwd_last if summary.cwd_last and os.path.isdir(
-                summary.cwd_last) else None
-            self.add_terminal_tab(working_directory=cwd)
-            summary_path = store.summary_path(summary.id)
-            if os.path.isfile(summary_path):
+            record = store.load(summary.id) if store else None
+            episodes = copilot_resume.episodes_of(record) if record else []
+            if episodes:
+                # "Restore" resumes the last stretch of work (the most recent
+                # episode); the expander offers the earlier ones.
+                self._restore_episode(episodes[-1], summary, len(episodes) - 1)
+            else:
+                cwd = summary.cwd_last if summary.cwd_last and os.path.isdir(
+                    summary.cwd_last) else None
+                self.add_terminal_tab(working_directory=cwd)
+            summary_path = store.summary_path(summary.id) if store else None
+            if summary_path and os.path.isfile(summary_path):
                 self.open_path(summary_path)
             dialog.close()
 

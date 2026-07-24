@@ -790,6 +790,23 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_episode_resume_wired(self):
+        # Restoring a session resumes an *episode*: a pane at the episode cwd
+        # with a history seed file, passed via extra_env to the spawn.
+        self.assertIn("def _restore_episode(self, episode, summary, index",
+                      SOURCE)
+        self.assertIn("def _write_seed_file(self, episode, tag)", SOURCE)
+        self.assertIn("copilot_resume.episodes_of(", SOURCE)
+        self.assertIn("copilot_resume.seed_file_content(", SOURCE)
+        self.assertIn('"AGENT_TERMINAL_SEED_HISTFILE": seed', SOURCE)
+        # the seed reaches the child through the pane spawn env
+        self.assertIn("def create_terminal_pane(self, command=None, "
+                      "working_directory=None,", SOURCE)
+        self.assertIn("extra_env=extra_env", SOURCE)
+        # "Restore" resumes the most recent episode; the browser lists the rest
+        self.assertIn("self._restore_episode(episodes[-1], summary, "
+                      "len(episodes) - 1)", SOURCE)
+
     def test_digest_mode_ab_toggle_wired(self):
         # The heuristic<->LLM context A/B switch: an action + accelerator, a
         # session override read at submit time, and an injected summarizer

@@ -370,6 +370,57 @@ class SnippetGuardrailTests(unittest.TestCase):
                       "vte.shell.precmd", "vte.ext.agentterm.cmd"):
             self.assertIn(token, self.text)
 
+    def test_seed_block_placement(self):
+        # Episode history seed: recall the episode, relocate HISTFILE off the
+        # user's global history. Must sit ABOVE the journaling guards (seeding
+        # is independent of command journaling) but BELOW the interactive
+        # guard.
+        text = self.text
+        self.assertIn("builtin history -c", text)
+        self.assertIn('builtin history -r "${AGENT_TERMINAL_SEED_HISTFILE}"',
+                      text)
+        self.assertIn('HISTFILE="${AGENT_TERMINAL_SEED_HISTFILE}"', text)
+        # order by the actual statements (the names also appear in comments)
+        seed = text.index('if [ -n "${AGENT_TERMINAL_SEED_HISTFILE:-}" ]')
+        no_integration = text.index(
+            '[ -z "${AGENT_TERMINAL_NO_INTEGRATION:-}" ] || return 0')
+        self.assertLess(text.index('[[ $- == *i* ]] || return 0'), seed)
+        self.assertLess(seed, no_integration)
+
+    def test_seed_block_recalls_and_relocates(self):
+        # Behavioral: the seed block's exact commands recall only the episode
+        # and relocate HISTFILE so the user's global history is never written.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            glob = os.path.join(d, "global")
+            seed = os.path.join(d, "seed")
+            with open(glob, "w") as fh:
+                fh.write("global_only_cmd\n")
+            with open(seed, "w") as fh:
+                fh.write("episode_cmd_x\nepisode_cmd_y\n")
+            script = (
+                "set -o history\n"
+                f'HISTFILE="{glob}"; builtin history -r "$HISTFILE"\n'
+                f'export AGENT_TERMINAL_SEED_HISTFILE="{seed}"\n'
+                'if [ -n "${AGENT_TERMINAL_SEED_HISTFILE:-}" ] '
+                '&& [ -f "${AGENT_TERMINAL_SEED_HISTFILE}" ]; then\n'
+                "  builtin history -c\n"
+                '  builtin history -r "${AGENT_TERMINAL_SEED_HISTFILE}"\n'
+                '  HISTFILE="${AGENT_TERMINAL_SEED_HISTFILE}"\n'
+                "  unset AGENT_TERMINAL_SEED_HISTFILE\n"
+                "fi\n"
+                "builtin history\n"
+                'echo "HF=$HISTFILE"\n')
+            out = subprocess.run(
+                ["bash", "--norc", "--noprofile"], input=script,
+                capture_output=True, text=True).stdout
+            self.assertIn("episode_cmd_x", out)      # episode recalled
+            self.assertNotIn("global_only_cmd", out)  # only the episode
+            self.assertIn(f"HF={seed}", out)          # HISTFILE relocated
+            with open(glob) as fh:
+                self.assertEqual(fh.read(), "global_only_cmd\n")  # intact
+
 
 if __name__ == "__main__":
     unittest.main()
