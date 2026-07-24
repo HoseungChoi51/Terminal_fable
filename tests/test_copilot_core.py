@@ -65,6 +65,15 @@ class ConfigTests(unittest.TestCase):
             got = p({"llm": {"send_output": value}}).llm.send_output
             self.assertEqual(got, want, value)
 
+    def test_digest_mode_enum(self):
+        p = cconfig.parse_assistant_config
+        self.assertEqual(p({}).llm.digest_mode, "heuristic")       # default
+        for value, want in (("llm", "llm"), ("heuristic", "heuristic"),
+                            ("LLM", "llm"), ("garbage", "heuristic"),
+                            (True, "heuristic"), (5, "heuristic")):
+            got = p({"llm": {"digest_mode": value}}).llm.digest_mode
+            self.assertEqual(got, want, value)
+
 
 class RedactTests(unittest.TestCase):
     def assertRedacts(self, text, leaked):

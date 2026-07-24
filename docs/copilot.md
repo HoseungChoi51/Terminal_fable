@@ -126,7 +126,9 @@ language model, both **off by default** and gated:
   **Ctrl+Shift+M** to open the **model picker** — it shows the full
   local-first chain and lists the models the primary endpoint advertises
   (e.g. a LiteLLM gateway fronting several backends); pick one to pin it
-  for the session.
+  for the session. **Ctrl+Shift+D** flips how the task context is built —
+  the local heuristic digest vs. an LLM-written summary — so you can A/B
+  the two live; the ⌁ ASK header shows which is active.
 - *Session summaries* — **View → Session Summary…** recaps what you were
   doing in the current terminal; when you leave a session idle after
   real work, a quiet chip points you to it.
@@ -299,7 +301,7 @@ missing or invalid values fall back to the defaults shown here:
     "llm": {"provider": "openai", "base_url": "https://api.openai.com/v1",
             "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY",
             "allow_remote_context": false, "send_output": "digest",
-            "timeout_s": 30},
+            "digest_mode": "heuristic", "timeout_s": 30},
     "ask": {"enabled": true, "auto_pilot": false,
             "auto_pilot_max_risk": "local-change", "carry_draft": true,
             "max_turns": 8},
@@ -331,6 +333,16 @@ missing or invalid values fall back to the defaults shown here:
   `"none"` (commands only), `"digest"` (a distilled, redacted digest of the
   salient command — the default), or `"full"` (the redacted verbose tail).
   Legacy booleans still parse (`false`→none, `true`→full).
+- `llm.digest_mode` — *how* the salient command's output is distilled:
+  `"heuristic"` (the local pure digester — fast, deterministic; default) or
+  `"llm"` (an extra LLM call summarizes it — slower, richer). The two exist
+  to be **A/B compared**: toggle between them at runtime with
+  **Ctrl+Shift+D** (or *View ▸ Toggle Context Mode*); the active mode shows
+  in the ⌁ ASK bar header (`ctx: heuristic` / `ctx: llm`). In `"llm"` mode
+  the summarizer runs on a worker thread, stays inside the redaction choke
+  point (its input is the already-redacted digest, its reply re-redacted),
+  and falls back to the heuristic digest if no endpoint is eligible or the
+  call fails. Orthogonal to `send_output` (which governs *how much*).
 - `llm.system_suffix` — appended to the system prompt (endpoint quirks, e.g. `/no_think`).
 - `llm.timeout_s` — per-request timeout (bounds each endpoint before falling to the next).
 - `ask.enabled` — enable ask mode (Ctrl+?); on by default.

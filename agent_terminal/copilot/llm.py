@@ -210,6 +210,16 @@ _EXPLAIN_SYSTEM = (
     "markdown, no preamble."
 )
 
+_OUTPUT_DIGEST_SYSTEM = (
+    "You compress one terminal command's output into context for another "
+    "assistant that will answer the user's question. You are given the "
+    "command, the user's question, and the command's (already-distilled) "
+    "output. Reply with at most 6 short plain-text lines: the outcome "
+    "(success or failure), the key error(s) quoted verbatim if any, and "
+    "the one or two details most relevant to the question. No preamble, "
+    "no markdown, no advice — only the facts from the output."
+)
+
 
 def _system(base, suffix):
     return base + ("\n" + suffix if suffix else "")
@@ -234,6 +244,15 @@ def explain_messages(command, suffix=""):
     # An answer command can be a multi-line heredoc carrying a key body.
     return [{"role": "system", "content": _system(_EXPLAIN_SYSTEM, suffix)},
             {"role": "user", "content": _redact_multiline(command)}]
+
+
+def output_digest_messages(command, output, question, suffix=""):
+    body = (f"Command: {_redact_multiline(command)}\n"
+            f"Question: {_redact_multiline(question)}\n\n"
+            f"Output:\n{output}")
+    return [{"role": "system",
+             "content": _system(_OUTPUT_DIGEST_SYSTEM, suffix)},
+            {"role": "user", "content": body}]
 
 
 # -- provider -----------------------------------------------------------
@@ -396,6 +415,31 @@ def suggest_commands(config, *, query, cwd=None, project=None,
         config, intent_messages(query, context, config.system_suffix),
         json_mode=True, chain=chain, opener=opener)
     return replace(parse_intent_response(text), endpoint=label)
+
+
+def digest_output_llm(config, *, command, output, question="",
+                      chain=None, opener=None) -> str | None:
+    """An LLM-written digest of one command's output, for the "llm"
+    digest_mode A/B (vs the local heuristic digester).
+
+    `output` must already be redacted (it comes from a CommandRecord's
+    digest/tail); it is re-redacted going in and the model's reply is
+    re-redacted coming out, so this stays inside the choke point. Returns
+    None when no endpoint is eligible or the call fails, so the caller
+    falls back to the heuristic digest rather than losing context.
+    """
+    source = _redact_multiline(output or "").strip()
+    if not source:
+        return None
+    try:
+        text, _ = _run_chain(
+            config,
+            output_digest_messages(command or "", source, question,
+                                   config.system_suffix),
+            json_mode=False, chain=chain, opener=opener)
+    except LlmError:
+        return None
+    return _redact_multiline(text.strip()) or None
 
 
 def summarize(config, *, cwd=None, project=None, recent_commands=(),

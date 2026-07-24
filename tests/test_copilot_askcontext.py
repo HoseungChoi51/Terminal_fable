@@ -145,5 +145,40 @@ class OutputModeTests(unittest.TestCase):
         self.assertIn("progress 29", ctx)   # a raw tail line the digest drops
 
 
+class SummarizeInjectionTests(unittest.TestCase):
+    """The injected `summarize` callable for the "llm" digest mode."""
+
+    def _cargo(self):
+        return _episode([rec("cargo build", exit_code=101, started_at=1000,
+                             output_lines=CARGO_ERR)])
+
+    def test_summarize_replaces_the_salient_digest(self):
+        calls = []
+
+        def summarize(record):
+            calls.append(record.cmd)
+            return "LLM says: the borrow checker rejected buf."
+
+        ctx = askcontext.build_ask_context(
+            self._cargo(), question="why fail?", summarize=summarize)
+        self.assertIn("$ cargo build", ctx)
+        self.assertIn("LLM says: the borrow checker", ctx)
+        self.assertNotIn("error[E0499]", ctx)      # heuristic digest replaced
+        self.assertEqual(calls, ["cargo build"])   # only the salient command
+
+    def test_falls_back_to_heuristic_when_summarize_returns_none(self):
+        # A failed/empty LLM call must never drop the context.
+        ctx = askcontext.build_ask_context(
+            self._cargo(), question="why fail?", summarize=lambda r: None)
+        self.assertIn("error[E0499]", ctx)          # heuristic digest kept
+
+    def test_summarize_ignored_when_output_mode_none(self):
+        called = []
+        askcontext.build_ask_context(
+            self._cargo(), question="why", output_mode="none",
+            summarize=lambda r: called.append(1) or "x")
+        self.assertEqual(called, [])                # "none" sends no output
+
+
 if __name__ == "__main__":
     unittest.main()

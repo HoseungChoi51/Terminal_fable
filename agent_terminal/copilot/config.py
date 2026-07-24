@@ -63,6 +63,12 @@ class LlmConfig:
     #   "full"   — send the redacted verbose tail
     # Legacy booleans still parse: false -> "none", true -> "full".
     send_output: str = "digest"
+    # How the salient command's output is distilled into context:
+    #   "heuristic" — the local pure digester (fast, deterministic; default)
+    #   "llm"       — an extra LLM call summarizes it (slower, richer; for
+    #                 A/B testing the two against each other)
+    # On failure or no eligible endpoint, "llm" falls back to "heuristic".
+    digest_mode: str = "heuristic"
     timeout_s: int = 30
     # Appended to the system prompt; lets endpoint quirks be handled by
     # config alone (e.g. "/no_think" to disable Qwen thinking on Ollama).
@@ -135,6 +141,9 @@ def _parse_section(cls, payload):
         if spec.name == "send_output":
             values[spec.name] = _send_output_mode(
                 payload.get(spec.name), default)
+        elif spec.name == "digest_mode":
+            values[spec.name] = _enum(
+                payload.get(spec.name), default, ("heuristic", "llm"))
         else:
             values[spec.name] = _coerce(payload.get(spec.name), default)
     return cls(**values)
@@ -145,6 +154,13 @@ def _send_output_mode(value, default):
     if isinstance(value, bool):
         return "full" if value else "none"
     if isinstance(value, str) and value.lower() in ("none", "digest", "full"):
+        return value.lower()
+    return default
+
+
+def _enum(value, default, allowed):
+    """A case-insensitive string from a fixed set, else the default."""
+    if isinstance(value, str) and value.lower() in allowed:
         return value.lower()
     return default
 

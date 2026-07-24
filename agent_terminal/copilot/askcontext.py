@@ -59,13 +59,24 @@ def _salient_record(records, query):
     return records[-1] if records else None
 
 
-def _detail(lines, record, *, cap, errors_only, output_mode):
-    """Append a command line + (per output_mode) its digest / tail."""
+def _detail(lines, record, *, cap, errors_only, output_mode, summarize=None):
+    """Append a command line + (per output_mode) its digest / tail.
+
+    When `summarize` is given (the "llm" digest_mode) it produces the
+    output block for this record; a None/empty return falls back to the
+    heuristic digest below, so a failed LLM call never drops the context.
+    """
     if not record.cmd:
         return
     lines.append(f"$ {_first_line(record.cmd)}{_exit_suffix(record)}")
     if output_mode == "none":
         return
+    if summarize is not None:
+        text = summarize(record)
+        if text:
+            for line in str(text).splitlines():
+                lines.append(f"    {line}")
+            return
     if output_mode == "full" and record.output_tail:
         for text in record.output_tail[-cap:]:
             lines.append(f"    {text}")
@@ -100,10 +111,15 @@ def _fit(lines, budget_chars) -> str:
 
 
 def build_ask_context(episode, *, question="", draft="",
-                      output_mode="digest", budget_chars=3000) -> str:
+                      output_mode="digest", budget_chars=3000,
+                      summarize=None) -> str:
     """The activity block ask mode sends as terminal context (or "").
 
     output_mode: "none" (commands only) | "digest" | "full" (verbose tail).
+    summarize: optional `record -> str|None` for the "llm" digest_mode; it
+    replaces the heuristic digest of the *salient* command (the biggest,
+    most-relevant slice) and falls back to it on None. Kept injected so
+    this module stays pure — the network lives in the callable.
     """
     if episode is None or not episode.records:
         return ""
@@ -116,7 +132,7 @@ def build_ask_context(episode, *, question="", draft="",
     salient = _salient_record(records, query)
     if salient is not None:
         _detail(lines, salient, cap=_DETAIL_DIGEST_LINES, errors_only=False,
-                output_mode=output_mode)
+                output_mode=output_mode, summarize=summarize)
         detailed.add(id(salient))
 
     for record in records:

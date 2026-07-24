@@ -1257,8 +1257,8 @@ ACTION_NAMES = (
     "copy", "paste", "select-all", "find", "find-next", "find-previous",
     "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
-    "copilot-menu", "copilot-ask", "copilot-model", "copilot-pause",
-    "copilot-summary", "copilot-debug", "copilot-sessions",
+    "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
+    "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -1303,6 +1303,7 @@ ACCELERATORS = {
     # the shifted slash.
     "copilot-ask": ("<Ctrl>question", "<Ctrl><Shift>slash"),
     "copilot-model": ("<Ctrl><Shift>m",),
+    "copilot-digest-mode": ("<Ctrl><Shift>d",),
     "copilot-pause": ("<Alt><Shift>a",),
     "copilot-sessions": ("<Ctrl><Shift>s",),
     "shortcuts": ("<Ctrl><Shift>h", "F1"),
@@ -1580,6 +1581,36 @@ def load_gtk():
     return SimpleNamespace(Gdk=Gdk, GdkPixbuf=GdkPixbuf, Gio=Gio, GLib=GLib,
                            GObject=GObject, Graphene=Graphene, Gsk=Gsk,
                            Gtk=Gtk, Pango=Pango, Vte=Vte)
+
+
+def _record_output_source(record):
+    """The best already-redacted material to summarize for one command: the
+    heuristic digest (salience-preserving), else the stored output tail."""
+    dg = getattr(record, "digest", None)
+    if dg is not None and not dg.is_empty():
+        return dg.render()
+    return "\n".join(getattr(record, "output_tail", None) or ())
+
+
+def _llm_summarizer(cfg, chain, question):
+    """A `record -> str|None` output summarizer for the "llm" digest mode,
+    caching by command seq so re-asking about the same episode reuses the
+    summary (the on-demand, non-daemon "sidecar"). Returns None to fall back
+    to the heuristic digest."""
+    cache = {}
+
+    def summarize(record):
+        key = getattr(record, "seq", None)
+        if key in cache:
+            return cache[key]
+        source = _record_output_source(record)
+        text = (copilot_llm.digest_output_llm(
+            cfg, command=getattr(record, "cmd", "") or "", output=source,
+            question=question, chain=chain) if source.strip() else None)
+        cache[key] = text
+        return text
+
+    return summarize
 
 
 _NATIVE_CLASSES = None
@@ -3208,6 +3239,7 @@ def build_native_classes(g):
             self._ask_close = None       # teardown closure for the open bar
             self._copilot_chain_cache = None
             self._pinned_model = None     # model chosen via the picker
+            self._digest_mode_override = None  # A/B toggle over llm.digest_mode
             self._model_dialog = None
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
@@ -3270,6 +3302,7 @@ def build_native_classes(g):
             view.append("Command Menu…", "win.copilot-menu")
             view.append("Ask Copilot…", "win.copilot-ask")
             view.append("Copilot Model", "win.copilot-model")
+            view.append("Toggle Context Mode", "win.copilot-digest-mode")
             view.append("Session Summary…", "win.copilot-summary")
             view.append("Session History…", "win.copilot-sessions")
             view.append("Copilot Journal (Debug)", "win.copilot-debug")
@@ -3344,10 +3377,13 @@ def build_native_classes(g):
             if not eligible:
                 return "copilot: cloud only (gated)"
             # Abbreviated: the chosen model, else the primary endpoint's
-            # first word (e.g. "centinel").
+            # first word (e.g. "centinel"). A live A/B context override is
+            # appended so the active mode is always visible.
             primary = eligible[0]
+            override = getattr(self, "_digest_mode_override", None)
+            suffix = f"  ·  ctx:{override}" if override else ""
             return "copilot: " + (primary.model
-                                  or (primary.label.split() or ["?"])[0])
+                                  or (primary.label.split() or ["?"])[0]) + suffix
 
         def _build_status_bar(self):
             bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -4035,6 +4071,8 @@ def build_native_classes(g):
                 self.show_ask_overlay()
             elif name == "copilot-model":
                 self.show_model_picker()
+            elif name == "copilot-digest-mode":
+                self.toggle_copilot_digest_mode()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -4141,7 +4179,8 @@ def build_native_classes(g):
             badge = Gtk.Label(label="⌁ ASK")
             badge.add_css_class("ask-badge")
             model_lbl = Gtk.Label(label=copilot_llm.chain_label(
-                chain, llm_cfg.allow_remote_context))
+                chain, llm_cfg.allow_remote_context)
+                + f"  ·  ctx: {self._effective_digest_mode(llm_cfg)}")
             model_lbl.set_xalign(0.0)
             model_lbl.set_hexpand(True)
             model_lbl.set_ellipsize(Pango.EllipsizeMode.END)
@@ -4402,17 +4441,28 @@ def build_native_classes(g):
                 spinner.start()
                 state["busy"] = True
                 cfg, ch = llm_cfg, chain
-                context = self._assistant_context()
+                context = self._assistant_context()   # on the GTK thread
                 episode = context.pop("episode")
                 draft = session.seed or None
-                # The distilled, redacted terminal-activity block — salience
-                # ranked by this question. send_output gates what's included.
-                activity = (copilot_askcontext.build_ask_context(
-                    episode, question=query, draft=session.seed or "",
-                    output_mode=llm_cfg.send_output) if episode else None)
+                mode = self._effective_digest_mode(llm_cfg)
 
                 def work():
                     try:
+                        # In "llm" mode an extra call summarizes the salient
+                        # command's (already-redacted) output; it runs here on
+                        # the worker thread and falls back to the heuristic
+                        # digest on failure. Built inside work() because it is
+                        # network. send_output="none" sends no output at all.
+                        summarize = None
+                        if (mode == "llm" and episode is not None
+                                and cfg.send_output != "none"):
+                            summarize = _llm_summarizer(cfg, ch, query)
+                        # The distilled, redacted terminal-activity block,
+                        # salience-ranked by this question.
+                        activity = (copilot_askcontext.build_ask_context(
+                            episode, question=query, draft=draft or "",
+                            output_mode=cfg.send_output, summarize=summarize)
+                            if episode else None)
                         result = copilot_llm.suggest_commands(
                             cfg, query=query, chain=ch, draft_command=draft,
                             activity=activity, **context)
@@ -4513,6 +4563,27 @@ def build_native_classes(g):
             journal.paused = not journal.paused
             self._flash_pane(pane, "Copilot paused" if journal.paused
                              else "Copilot resumed")
+
+        def _effective_digest_mode(self, llm_cfg):
+            """The digest mode in force: the session A/B override, else the
+            configured llm.digest_mode."""
+            return getattr(self, "_digest_mode_override", None) \
+                or llm_cfg.digest_mode
+
+        def toggle_copilot_digest_mode(self):
+            """Flip context building between the heuristic digester and the
+            LLM summarizer for the session (Ctrl+Shift+D) — the A/B switch.
+            Takes effect on the next question."""
+            llm_cfg = self.options.native_config.assistant.llm
+            current = self._effective_digest_mode(llm_cfg)
+            self._digest_mode_override = ("llm" if current == "heuristic"
+                                          else "heuristic")
+            self._refresh_status()
+            pane = self._active_pane()
+            if pane is not None:
+                self._flash_pane(pane, "Context: " + (
+                    "LLM-summarized" if self._digest_mode_override == "llm"
+                    else "heuristic digest"))
 
         def _flash_pane(self, pane, text, duration=1100):
             """Briefly show a quiet chip over a terminal pane (no focus grab)."""

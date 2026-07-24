@@ -790,6 +790,26 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_digest_mode_ab_toggle_wired(self):
+        # The heuristic<->LLM context A/B switch: an action + accelerator, a
+        # session override read at submit time, and an injected summarizer
+        # that runs on the worker thread (never blocking the UI) and falls
+        # back to the heuristic digest.
+        self.assertIn("copilot-digest-mode", nt.ACTION_NAMES)
+        self.assertIn("<Ctrl><Shift>d", nt.ACCELERATORS["copilot-digest-mode"])
+        self.assertIn("def toggle_copilot_digest_mode(self)", SOURCE)
+        self.assertIn("def _effective_digest_mode(self, llm_cfg)", SOURCE)
+        self.assertIn("self._digest_mode_override", SOURCE)
+        # the summarizer is built inside the ask-mode work() (worker thread),
+        # not on the GTK thread, because it makes a network call
+        submit = SOURCE.split("def submit_question(", 1)[1].split(
+            "threading.Thread", 1)[0]
+        self.assertIn("def work():", submit)
+        self.assertIn("_llm_summarizer(cfg, ch, query)", submit)
+        self.assertIn('mode == "llm"', submit)
+        # the summarizer itself must degrade to the heuristic digest
+        self.assertIn("def _llm_summarizer(cfg, chain, question)", SOURCE)
+
     def test_ask_mode_sends_digested_episode_activity(self):
         # submit_question must derive the current episode, build the
         # distilled+redacted activity block from it, and pass it to the LLM
@@ -797,7 +817,7 @@ class SourceGuardrailTests(unittest.TestCase):
         # GTK e2e exercises end-to-end.)
         self.assertIn("def _current_episode(self)", SOURCE)
         self.assertIn("copilot_askcontext.build_ask_context(", SOURCE)
-        self.assertIn("output_mode=llm_cfg.send_output", SOURCE)
+        self.assertIn("output_mode=cfg.send_output", SOURCE)
         self.assertIn("activity=activity", SOURCE)
         # the ask bar surfaces the inferred task so a bad segmentation shows
         self.assertIn("episode_now = self._current_episode()", SOURCE)

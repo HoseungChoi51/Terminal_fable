@@ -204,6 +204,58 @@ class RedactionAndSecretTests(unittest.TestCase):
         self.assertNotIn("urllib", ua.lower())
 
 
+class LlmDigestTests(unittest.TestCase):
+    """The "llm" digest_mode summarizer (digest_output_llm)."""
+
+    def setUp(self):
+        cllm._MODEL_CACHE.clear()
+
+    def test_returns_model_summary_for_eligible_endpoint(self):
+        server = FakeServer(content="Build failed: error[E0499].")
+        out = cllm.digest_output_llm(
+            _cfg(allow_remote_context=True), command="cargo build",
+            output="error[E0499]: cannot borrow\nerror: could not compile",
+            question="why did it fail?", chain=[LAN1], opener=server)
+        self.assertEqual(out, "Build failed: error[E0499].")
+        # the command's output is what we asked the model to compress
+        sent = json.dumps(server.chat_bodies()[0])
+        self.assertIn("could not compile", sent)
+
+    def test_input_and_output_are_redacted(self):
+        # A secret in the output to summarize never leaves, and a secret the
+        # model happens to echo back is scrubbed from the returned digest.
+        server = FakeServer(content="key was AKIAIOSFODNN7EXAMPLE")
+        out = cllm.digest_output_llm(
+            _cfg(allow_remote_context=True), command="cat creds",
+            output="AKIAIOSFODNN7EXAMPLE", question="what is it",
+            chain=[LAN1], opener=server)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", json.dumps(
+            server.chat_bodies()[0]))            # never sent
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", out)  # scrubbed on return
+
+    def test_none_when_no_endpoint_eligible(self):
+        # cloud-only + remote off -> no endpoint -> None (caller falls back).
+        out = cllm.digest_output_llm(
+            _cfg(allow_remote_context=False), command="cargo build",
+            output="error", question="why", chain=[CLOUD], opener=FakeServer())
+        self.assertIsNone(out)
+
+    def test_none_on_transport_failure(self):
+        server = FakeServer(fail_hosts={"192.168.210.210"})
+        out = cllm.digest_output_llm(
+            _cfg(allow_remote_context=True), command="cargo build",
+            output="error", question="why", chain=[LAN1], opener=server)
+        self.assertIsNone(out)
+
+    def test_none_for_empty_output(self):
+        server = FakeServer()
+        out = cllm.digest_output_llm(
+            _cfg(allow_remote_context=True), command="true", output="   ",
+            question="q", chain=[LAN1], opener=server)
+        self.assertIsNone(out)
+        self.assertEqual(server.requests, [])   # no call made
+
+
 class ListModelsTests(unittest.TestCase):
     def test_lists_all_advertised_models(self):
         server = FakeServer(models=("hulk", "loki"))
