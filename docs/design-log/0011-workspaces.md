@@ -1,4 +1,4 @@
-# 0002 — Workspaces: episode resume, job grouping, live pane moves, naming
+# 0011 — Workspaces: episode resume, job grouping, live pane moves, naming
 
 - Developed: 2026-07 · Status: Built · ADR: [0011](../decisions/0011-workspaces-and-live-pane-moves.md)
 - Modules: `copilot/resume.py`, `copilot/jobs.py` (+ `native_terminal.py`)

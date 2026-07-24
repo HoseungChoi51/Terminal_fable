@@ -1,4 +1,4 @@
-# 0001 — Terminal output as ask-mode context (+ LLM A/B mode)
+# 0010 — Terminal output as ask-mode context (+ LLM A/B mode)
 
 - Developed: 2026-07 · Status: Built · ADR: [0008](../decisions/0008-llm-provider-and-remote-gate.md) (amended)
 - Modules: `copilot/digest.py`, `copilot/episode.py`, `copilot/askcontext.py`
