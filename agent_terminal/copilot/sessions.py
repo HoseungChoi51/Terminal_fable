@@ -52,6 +52,7 @@ class SessionSummary:
     ended_at: float
     command_count: int
     last_command: str | None = None
+    started_at: float = 0.0        # for job clustering by co-activity
 
 
 def default_base_dir(env=None) -> str:
@@ -278,7 +279,8 @@ class SessionStore:
             id=str(data["id"]), title=data.get("title", "Session"),
             cwd_last=data.get("cwd_last"), project=data.get("project"),
             ended_at=float(data.get("ended_at", 0.0)),
-            command_count=len(commands), last_command=last_cmd)
+            command_count=len(commands), last_command=last_cmd,
+            started_at=float(data.get("started_at", 0.0)))
 
     def load(self, session_id) -> SessionRecord | None:
         try:

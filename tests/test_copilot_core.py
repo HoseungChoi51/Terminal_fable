@@ -74,6 +74,19 @@ class ConfigTests(unittest.TestCase):
             got = p({"llm": {"digest_mode": value}}).llm.digest_mode
             self.assertEqual(got, want, value)
 
+    def test_workspace_defaults_and_parse(self):
+        p = cconfig.parse_assistant_config
+        ws = p({}).workspace
+        self.assertEqual(ws.max_panes_per_window, 6)   # user's soft ceiling
+        self.assertEqual(ws.min_pane_cols, 80)
+        self.assertEqual(ws.min_pane_rows, 24)
+        self.assertEqual(ws.job_gap_minutes, 5)
+        self.assertEqual(ws.revert_seconds, 15)
+        ws2 = p({"workspace": {"max_panes_per_window": 4,
+                               "job_gap_minutes": 10}}).workspace
+        self.assertEqual(ws2.max_panes_per_window, 4)
+        self.assertEqual(ws2.job_gap_minutes, 10)
+
 
 class RedactTests(unittest.TestCase):
     def assertRedacts(self, text, leaked):

@@ -790,6 +790,24 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_workspace_job_restore_wired(self):
+        # Detected jobs restore as one bounded split-pane window (packing),
+        # with an act-then-revert bar (auto-revert timer + Keep/Revert).
+        self.assertIn("def _restore_job(self, job", SOURCE)
+        self.assertIn("def _load_workspace(self, plan)", SOURCE)
+        self.assertIn("def _show_confirm_revert(self, message, on_revert",
+                      SOURCE)
+        self.assertIn("copilot_jobs.cluster(", SOURCE)
+        self.assertIn("copilot_jobs.pack(", SOURCE)
+        self.assertIn("def new_window(self)", SOURCE)
+        # act-then-revert: an auto-revert countdown + revert closes what opened
+        self.assertIn("GLib.timeout_add_seconds(1, tick)", SOURCE)
+        self.assertIn("on_revert=lambda: [w.close() for w in created]", SOURCE)
+        # packing is fed the real monitor + cell metrics (the legibility floor)
+        self.assertIn("def _workspace_avail_px(self)", SOURCE)
+        self.assertIn("def _workspace_cell_px(self)", SOURCE)
+        self.assertIn("get_char_width()", SOURCE)
+
     def test_episode_resume_wired(self):
         # Restoring a session resumes an *episode*: a pane at the episode cwd
         # with a history seed file, passed via extra_env to the spawn.

@@ -95,6 +95,20 @@ class ResumeConfig:
 
 
 @dataclass(frozen=True)
+class WorkspaceConfig:
+    """Grouping sessions into jobs and laying them out as split panes."""
+    # Legibility floor: a restored pane is never sub-divided below this.
+    min_pane_cols: int = 80
+    min_pane_rows: int = 24
+    # Soft ceiling on panes per window before spilling into another window.
+    max_panes_per_window: int = 6
+    # Sessions whose active spans are within this are treated as one job.
+    job_gap_minutes: int = 5
+    # A workspace rearrange offers Keep/Revert; it auto-reverts after this.
+    revert_seconds: int = 15
+
+
+@dataclass(frozen=True)
 class AssistantConfig:
     enabled: bool = True
     shell_integration: bool = True
@@ -106,6 +120,7 @@ class AssistantConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     ask: AskConfig = field(default_factory=AskConfig)
     resume: ResumeConfig = field(default_factory=ResumeConfig)
+    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
 
 
 def _coerce(value, default):
@@ -174,6 +189,7 @@ _SECTIONS = {
     "llm": LlmConfig,
     "ask": AskConfig,
     "resume": ResumeConfig,
+    "workspace": WorkspaceConfig,
 }
 
 

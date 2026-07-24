@@ -48,6 +48,19 @@ built on the journal:
   through bash's own history — `builtin history` — but your manager's own
   search is not seeded.)
 
+- *Workspaces.* One job often spans several sessions at once — a server
+  in one pane, a client in another, an editor in a third. The session
+  browser detects these (sessions whose active spans overlapped) and lists
+  them under **Workspaces**. *Open workspace* lays the job out as **split
+  panes in one window** — each pane resumed at its session's cwd + seeded
+  history. It never sub-divides below a legibility floor: on a small
+  laptop a six-pane job opens as two balanced windows; on an ultrawide, as
+  one. Because it rearranges your screen, it lands with a **Keep / Revert**
+  bar that auto-reverts after a few seconds (like a display-resolution
+  change) — so a mis-grouped guess is a single click to undo. Tunable via
+  `assistant.workspace` (`min_pane_cols`/`min_pane_rows`,
+  `max_panes_per_window`, `job_gap_minutes`, `revert_seconds`).
+
 **Phase P2 — command menu (shipped).** Press **Ctrl+Shift+Space** to
 open a command menu at the cursor: a searchable, ranked list of
 built-in recipes and commands from your own history, each tagged with a

@@ -45,6 +45,7 @@ from agent_terminal.copilot import ask as copilot_ask
 from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
 from agent_terminal.copilot import resume as copilot_resume
+from agent_terminal.copilot import jobs as copilot_jobs
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
@@ -1543,6 +1544,9 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .status-model { font-size: 0.8em; font-family: monospace;
                 color: alpha(currentColor, 0.7); }
 .status-hint { font-size: 0.78em; color: alpha(currentColor, 0.45); }
+/* Workspace act-then-revert confirmation bar. */
+.workspace-confirm { padding: 6px 12px; background-color: alpha(#6ab0ff, 0.16);
+                     border-top: 1px solid alpha(#6ab0ff, 0.4); }
 """
 
 SESSION_CHECKPOINT_SECONDS = 60
@@ -3243,6 +3247,7 @@ def build_native_classes(g):
             self._digest_mode_override = None  # A/B toggle over llm.digest_mode
             self._model_dialog = None
             self._sessions_dialog = None
+            self._revert_token = None          # identity of the open revert bar
             self.close_policy = options.native_config.pane_close_policy
             self.tabs = []
             self._picker_windows = []
@@ -3340,9 +3345,17 @@ def build_native_classes(g):
             self._ask_revealer.set_transition_type(
                 Gtk.RevealerTransitionType.SLIDE_UP)
             self._ask_revealer.set_reveal_child(False)
+            # A workspace rearrange (job restore / gather) confirms with a
+            # revert bar in this revealer — act first, offer undo (like a
+            # display-resolution change).
+            self._workspace_revealer = Gtk.Revealer()
+            self._workspace_revealer.set_transition_type(
+                Gtk.RevealerTransitionType.SLIDE_UP)
+            self._workspace_revealer.set_reveal_child(False)
             box.append(self.search_bar)
             box.append(self.notebook)
             box.append(self._ask_revealer)
+            box.append(self._workspace_revealer)
             box.append(self._build_status_bar())
             self.set_child(box)
 
@@ -4995,11 +5008,51 @@ def build_native_classes(g):
             box.set_margin_bottom(8)
             box.set_margin_start(8)
             box.set_margin_end(8)
+            # Detected workspaces (sessions that were active together) → open
+            # them as one bounded split-pane window.
+            ws = self.options.native_config.assistant.workspace
+            detected = copilot_jobs.cluster(
+                sessions, gap_s=max(ws.job_gap_minutes, 1) * 60)
+            if detected:
+                heading = Gtk.Label(label="Workspaces")
+                heading.set_xalign(0.0)
+                heading.add_css_class("heading")
+                box.append(heading)
+                jobs_list = Gtk.ListBox()
+                jobs_list.set_selection_mode(Gtk.SelectionMode.NONE)
+                for job in detected:
+                    jobs_list.append(self._job_row(job))
+                box.append(jobs_list)
             box.append(scroller)
             box.append(buttons)
             dialog.set_child(box)
             self._close_on_escape(dialog)
             dialog.present()
+
+        def _job_row(self, job):
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+            box.set_margin_start(10)
+            box.set_margin_end(6)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            text.set_hexpand(True)
+            title = Gtk.Label(label=job.title or "workspace")
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            meta = Gtk.Label(label=f"{job.size} sessions active together")
+            meta.set_xalign(0.0)
+            meta.add_css_class("dim-label")
+            text.append(title)
+            text.append(meta)
+            button = Gtk.Button(label="Open workspace")
+            button.connect("clicked", lambda *_: self._restore_job(
+                job, dialog=self._sessions_dialog))
+            box.append(text)
+            box.append(button)
+            row.set_child(box)
+            return row
 
         def _session_row(self, summary):
             row = Gtk.ListBoxRow()
@@ -5112,6 +5165,146 @@ def build_native_classes(g):
                 self.open_path(summary_path)
             dialog.close()
 
+        # -- workspaces: job restore + confirm/revert (copilot Phase B) ------
+
+        def _show_confirm_revert(self, message, on_revert, seconds=None):
+            """A "Keep / Revert (auto-revert in N s)" bar for a workspace
+            rearrange — act first, offer undo, like a display-resolution
+            change. `on_revert` runs on timeout or on Revert."""
+            ws = self.options.native_config.assistant.workspace
+            seconds = seconds if seconds is not None else ws.revert_seconds
+            token = object()
+            self._revert_token = token
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            bar.add_css_class("workspace-confirm")
+            label = Gtk.Label(label=message)
+            label.set_xalign(0.0)
+            label.set_hexpand(True)
+            label.set_wrap(True)
+            keep = Gtk.Button(label="Keep")
+            revert = Gtk.Button(label=f"Revert ({seconds}s)")
+            revert.add_css_class("destructive-action")
+            bar.append(label)
+            bar.append(revert)
+            bar.append(keep)
+            self._workspace_revealer.set_child(bar)
+            self._workspace_revealer.set_reveal_child(True)
+            state = {"left": seconds}
+
+            def close():
+                if self._revert_token is not token:
+                    return
+                self._revert_token = None
+                self._workspace_revealer.set_reveal_child(False)
+
+            def do_revert():
+                if self._revert_token is not token:
+                    return
+                close()
+                try:
+                    on_revert()
+                except Exception:
+                    pass
+
+            def tick():
+                if self._revert_token is not token:
+                    return False
+                state["left"] -= 1
+                if state["left"] <= 0:
+                    do_revert()
+                    return False
+                revert.set_label(f"Revert ({state['left']}s)")
+                return True
+
+            keep.connect("clicked", lambda *_: close())
+            revert.connect("clicked", lambda *_: do_revert())
+            GLib.timeout_add_seconds(1, tick)
+
+        def _workspace_cell_px(self):
+            """Char cell size (w, h) of a real terminal, for the pane floor."""
+            pane = self._recent_terminal_pane()
+            terminal = getattr(pane, "terminal", None)
+            try:
+                cw = int(terminal.get_char_width())
+                ch = int(terminal.get_char_height())
+                if cw > 0 and ch > 0:
+                    return (cw, ch)
+            except Exception:
+                pass
+            return (9, 18)
+
+        def _workspace_avail_px(self):
+            """Usable pane area of a window on this monitor (minus chrome)."""
+            try:
+                surface = self.get_surface()
+                monitor = self.get_display().get_monitor_at_surface(surface)
+                geo = monitor.get_geometry() if monitor else None
+                if geo and geo.width > 0:
+                    return (geo.width, max(geo.height - 120, 240))
+            except Exception:
+                pass
+            return (self.get_width() or 1400, self.get_height() or 900)
+
+        def _member_pane_spec(self, summary):
+            """(cwd, extra_env, title) to open one job member at its last
+            episode with that episode's history seeded."""
+            store = self._app.session_store
+            record = store.load(summary.id) if store else None
+            episodes = copilot_resume.episodes_of(record) if record else []
+            episode = episodes[-1] if episodes else None
+            cwd = (copilot_resume.resume_cwd(episode) if episode else None) \
+                or getattr(summary, "cwd_last", None)
+            cwd = cwd if cwd and os.path.isdir(cwd) else None
+            env = None
+            if episode is not None:
+                seed = self._write_seed_file(episode, f"{summary.id}-job")
+                if seed:
+                    env = {"AGENT_TERMINAL_SEED_HISTFILE": seed}
+            title = episode.title if episode else getattr(summary, "title", None)
+            return cwd, env, title
+
+        def _load_workspace(self, plan):
+            """Fill this window with a plan's members as split panes, dropping
+            the default tab it opened with."""
+            existing = list(self.tabs)
+            cwd, env, title = self._member_pane_spec(plan.members[0])
+            tab = self.add_terminal_tab(working_directory=cwd, extra_env=env,
+                                        title=title)
+            for index, member in enumerate(plan.members[1:], start=1):
+                cwd, env, title = self._member_pane_spec(member)
+                pane = self.create_terminal_pane(working_directory=cwd,
+                                                 extra_env=env, title=title)
+                # Alternate split axis so panes tile rather than stack.
+                orientation = (HORIZONTAL if index % 2 == 1 else VERTICAL)
+                tab.add_pane(pane, orientation)
+            for old in existing:
+                self.remove_tab(old)
+
+        def _restore_job(self, job, dialog=None):
+            ws = self.options.native_config.assistant.workspace
+            plans = copilot_jobs.pack(
+                job.members, avail_px=self._workspace_avail_px(),
+                cell_px=self._workspace_cell_px(),
+                min_cols=ws.min_pane_cols, min_rows=ws.min_pane_rows,
+                soft_max=ws.max_panes_per_window)
+            if not plans:
+                return
+            if dialog is not None:
+                dialog.close()
+            created = []
+            for plan in plans:
+                window = self._app.new_window()
+                window._load_workspace(plan)
+                created.append(window)
+            total = sum(plan.size for plan in plans)
+            where = (f" across {len(created)} windows"
+                     if len(created) > 1 else "")
+            created[0].present()
+            created[0]._show_confirm_revert(
+                f"Opened {total} panes as “{job.title or 'workspace'}”{where}"
+                " — Keep or Revert?",
+                on_revert=lambda: [w.close() for w in created])
+
         def _insert_session_command(self, dialog, row):
             summary = getattr(row, "_session", None)
             if summary is None or not summary.last_command:
@@ -5170,12 +5363,18 @@ def build_native_classes(g):
                 self._socket_server = None
             Gtk.Application.do_shutdown(self)
 
+        def new_window(self):
+            """Create, present, and return a fresh window (starts with one
+            default terminal tab)."""
+            window = NativeTerminalWindow(self, self.options)
+            window.present()
+            return window
+
         def _on_app_action(self, action, parameter, name):
             if name == "quit":
                 self.quit()
             elif name == "new-window":
-                window = NativeTerminalWindow(self, self.options)
-                window.present()
+                self.new_window()
 
         def _dispatch_control(self, message):
             # Socket messages arrive on a daemon thread; hop to GTK.
