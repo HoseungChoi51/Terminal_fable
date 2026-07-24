@@ -1,0 +1,13 @@
+   Compiling terminal-fable v0.1.0 (/home/chs/proj)
+error[E0499]: cannot borrow `buf` as mutable more than once at a time
+  --> src/lib.rs:42:5
+   |
+40 |     let a = &mut buf;
+   |             -------- first mutable borrow occurs here
+41 |     use(a);
+42 |     let b = &mut buf;
+   |             ^^^^^^^^ second mutable borrow occurs here
+   |
+error: aborting due to 1 previous error
+For more information about this error, try `rustc --explain E0499`.
+error: could not compile `terminal-fable` (lib) due to 1 previous error
