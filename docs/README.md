@@ -34,6 +34,10 @@ trying to do.
 - **[design-log/](design-log/README.md)** — a running record of *what was asked
   and why*, one entry per planning effort: the request (rephrased), the
   clarifying questions and the choices that shaped scope.
+- **[uutils-coreutils.md](uutils-coreutils.md)** — this machine runs the Rust
+  (uutils) coreutils by default: the setup, the compatibility caveat, the
+  fallback plan, and where to report coreutils bugs (upstream to uutils, **not**
+  Terminal Fable).
 
 ### …contribute to it
 
