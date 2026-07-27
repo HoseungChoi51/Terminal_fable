@@ -43,6 +43,9 @@ trying to do.
 - **[extending.md](extending.md)** — cookbook recipes: add an action + shortcut, a
   new pane type, a palette, a config option, a control-socket command, or a layout
   operation.
+- **[demo/README.md](demo/README.md)** — how the README animation is recorded:
+  the storyboard, the in-process driver, and why the frames come out of the
+  window's render tree instead of a screen grab.
 
 ### …rebuild it from scratch
 
@@ -69,6 +72,9 @@ docs/
   architecture.md               design & architecture overview
   developer-guide.md            setup, running, testing, conventions, workflow
   extending.md                  cookbook recipes for adding features
+  demo/
+    README.md                   how the README animation is recorded
+    demo.gif, demo.webp         the animation itself
   decisions/
     README.md                   ADR index
     0001-…-vte.md               delegate terminal emulation to VTE
