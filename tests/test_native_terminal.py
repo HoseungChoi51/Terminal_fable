@@ -810,6 +810,21 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("command is None and persistence is not None", spawn)
         self.assertIn("except Exception:", spawn)      # fail open
 
+    def test_reattach_and_detach_wired(self):
+        # Detachable sessions surface for reattach/kill; detach closes the
+        # frontend but leaves the process; a startup nudge points at them.
+        self.assertIn("def _orphaned_sessions(self)", SOURCE)
+        self.assertIn("def _reattach_session(self, info)", SOURCE)
+        self.assertIn("def detach_active_pane(self)", SOURCE)
+        self.assertIn("def _maybe_prompt_reattach(self)", SOURCE)
+        self.assertIn("ptyd.list_sessions()", SOURCE)
+        self.assertIn("ptyd.kill_session(info.id)", SOURCE)
+        self.assertIn("pane-detach", nt.ACTION_NAMES)
+        self.assertIn("add_terminal_tab(working_directory=cwd, "
+                      "session_id=info.id", SOURCE)
+        # a reattach must still route through ptyd even if the default is off
+        self.assertIn("persistence.enabled or self.reattach", SOURCE)
+
     def test_naming_wired(self):
         # Manual rename + LLM name suggestions; a name overrides the inferred
         # title, and the naming context is the redacted digest (not raw).

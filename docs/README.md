@@ -38,6 +38,9 @@ trying to do.
   (uutils) coreutils by default: the setup, the compatibility caveat, the
   fallback plan, and where to report coreutils bugs (upstream to uutils, **not**
   Terminal Fable).
+- **[persistence.md](persistence.md)** — detachable panes: run each shell in a
+  ptyd daemon so its process survives the frontend and can be reattached
+  (tmux-style), with context replay. Opt-in.
 
 ### …contribute to it
 

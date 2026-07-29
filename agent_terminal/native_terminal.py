@@ -1294,6 +1294,7 @@ ACTION_NAMES = (
     "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
     "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
     "pane-eject", "pane-send", "pane-rename", "window-rename", "workspace-name",
+    "pane-detach",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -2000,12 +2001,15 @@ def build_native_classes(g):
             # shell is made persistent (not explicit one-off commands). Fails
             # open to a direct spawn on any error.
             persistence = getattr(self, "persistence", None)
+            ring = persistence.scrollback_bytes if persistence else 0
+            # Route through ptyd for a new persistent shell, or whenever this
+            # pane is reattaching an existing session (even if the default is
+            # off — the session already exists).
             if (command is None and persistence is not None
-                    and persistence.enabled):
+                    and (persistence.enabled or self.reattach)):
                 try:
                     argv = ptyd_attach_argv(
-                        self.session_id, argv, cwd,
-                        persistence.scrollback_bytes,
+                        self.session_id, argv, cwd, ring,
                         create=not self.reattach)
                 except Exception:
                     pass
@@ -3393,6 +3397,10 @@ def build_native_classes(g):
                     SESSION_CHECKPOINT_SECONDS, self._session_tick)
                 self.connect("close-request", self._on_close_request)
             self._open_initial_tabs()
+            # One-shot nudge if processes are still detached in the background
+            # (survived a previous disconnect) and aren't currently open.
+            self._reattach_prompted = False
+            GLib.timeout_add_seconds(1, self._maybe_prompt_reattach)
 
         def _on_close_request(self, *args):
             self.flush_all_sessions()
@@ -3431,6 +3439,7 @@ def build_native_classes(g):
             view.append("Name Workspace (AI)…", "win.workspace-name")
             view.append("Eject Pane to New Window", "win.pane-eject")
             view.append("Send Pane to Window…", "win.pane-send")
+            view.append("Detach Pane (keep running)", "win.pane-detach")
             view.append("Copilot Model", "win.copilot-model")
             view.append("Toggle Context Mode", "win.copilot-digest-mode")
             view.append("Session Summary…", "win.copilot-summary")
@@ -4240,6 +4249,8 @@ def build_native_classes(g):
                 self.rename_current_window()
             elif name == "workspace-name":
                 self.show_name_workspace()
+            elif name == "pane-detach":
+                self.detach_active_pane()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -5155,6 +5166,20 @@ def build_native_classes(g):
             box.set_margin_bottom(8)
             box.set_margin_start(8)
             box.set_margin_end(8)
+            # Detachable sessions still running in the background (their
+            # processes survived a disconnect) → reattach or kill. Only those
+            # not currently open in a pane.
+            live = self._orphaned_sessions()
+            if live:
+                heading = Gtk.Label(label="Running (detached)")
+                heading.set_xalign(0.0)
+                heading.add_css_class("heading")
+                box.append(heading)
+                live_list = Gtk.ListBox()
+                live_list.set_selection_mode(Gtk.SelectionMode.NONE)
+                for info in live:
+                    live_list.append(self._ptyd_session_row(info, live_list))
+                box.append(live_list)
             # Detected workspaces (sessions that were active together) → open
             # them as one bounded split-pane window.
             ws = self.options.native_config.assistant.workspace
@@ -5200,6 +5225,105 @@ def build_native_classes(g):
             box.append(button)
             row.set_child(box)
             return row
+
+        # -- detachable sessions: reattach / detach / kill (persistence P3) ---
+
+        def _attached_session_ids(self):
+            ids = set()
+            for window in (self._app.get_windows() or []):
+                if not isinstance(window, NativeTerminalWindow):
+                    continue
+                for tab in window.tabs:
+                    for pane in tab.panes.values():
+                        sid = getattr(pane, "session_id", None)
+                        if sid and getattr(pane, "kind", None) == "terminal":
+                            ids.add(sid)
+            return ids
+
+        def _orphaned_sessions(self):
+            """Live ptyd sessions not currently open in any pane — the ones a
+            reattach can bring back."""
+            attached = self._attached_session_ids()
+            try:
+                return [s for s in ptyd.list_sessions()
+                        if s.id not in attached]
+            except Exception:
+                return []
+
+        def _ptyd_session_row(self, info, listbox):
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+            box.set_margin_start(10)
+            box.set_margin_end(6)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            text.set_hexpand(True)
+            title = Gtk.Label(label=info.cwd or "session")
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            meta = Gtk.Label(label=f"pid {info.child_pid or '?'} · "
+                             + (" ".join(info.argv) or "shell"))
+            meta.set_xalign(0.0)
+            meta.add_css_class("dim-label")
+            meta.set_ellipsize(Pango.EllipsizeMode.END)
+            text.append(title)
+            text.append(meta)
+            reattach = Gtk.Button(label="Reattach")
+            reattach.connect("clicked", lambda *_: self._reattach_session(info))
+            kill = Gtk.Button(label="Kill")
+            kill.add_css_class("destructive-action")
+
+            def do_kill(*_):
+                ptyd.kill_session(info.id)
+                listbox.remove(row)
+
+            kill.connect("clicked", do_kill)
+            box.append(text)
+            box.append(reattach)
+            box.append(kill)
+            row.set_child(box)
+            return row
+
+        def _reattach_session(self, info):
+            cwd = info.cwd if info.cwd and os.path.isdir(info.cwd) else None
+            title = (os.path.basename(info.cwd.rstrip("/"))
+                     if info.cwd else None)
+            self.add_terminal_tab(working_directory=cwd, session_id=info.id,
+                                  title=title)
+            if self._sessions_dialog is not None:
+                self._sessions_dialog.close()
+
+        def detach_active_pane(self):
+            """Close a detachable pane's frontend but leave its process running
+            in the background (reattach later from the session browser)."""
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is None or pane.kind != "terminal":
+                return
+            sid = getattr(pane, "session_id", None)
+            detachable = bool(sid) and ptyd.session_alive(sid)
+            tab.close_pane(pane.pane_id)      # the daemon + child survive
+            if detachable:
+                survivor = self._recent_terminal_pane()
+                if survivor is not None:
+                    self._flash_pane(
+                        survivor, "Detached — reattach from Ctrl+Shift+S")
+
+        def _maybe_prompt_reattach(self):
+            if getattr(self, "_reattach_prompted", False):
+                return False
+            self._reattach_prompted = True
+            count = len(self._orphaned_sessions())
+            if count:
+                pane = self._recent_terminal_pane()
+                if pane is not None:
+                    self._flash_pane(
+                        pane, f"{count} detached session"
+                        + ("" if count == 1 else "s")
+                        + " running — Ctrl+Shift+S to reattach", duration=4500)
+            return False
 
         def _session_row(self, summary):
             row = Gtk.ListBoxRow()
