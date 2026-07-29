@@ -46,6 +46,7 @@ from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
 from agent_terminal.copilot import resume as copilot_resume
 from agent_terminal.copilot import jobs as copilot_jobs
+from agent_terminal import ptyd
 # Re-exported from the shared TUI core so the standalone subprocesses depend
 # only on tui_core; kept importable from here for internal use + back-compat.
 from agent_terminal.tui_core import (  # noqa: F401
@@ -260,10 +261,20 @@ class TerminalSettings:
 
 
 @dataclass(frozen=True)
+class PersistenceConfig:
+    """Detachable panes: run each shell inside a ptyd daemon so it survives
+    the frontend and can be reattached. Off by default (opt-in) so the
+    default spawn path — and the dogfooding launchability — is unchanged."""
+    enabled: bool = False
+    scrollback_bytes: int = 512 * 1024
+
+
+@dataclass(frozen=True)
 class NativeConfig:
     pane_close_policy: str = DEFAULT_CLOSE_POLICY
     palette: str = DEFAULT_PALETTE
     pane_tints: bool = True
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     assistant: assistant_config.AssistantConfig = field(
         default_factory=assistant_config.AssistantConfig)
 
@@ -293,10 +304,18 @@ def load_native_config(path: str | os.PathLike | None = None) -> NativeConfig:
     policy = data.get("pane_close_policy", DEFAULT_CLOSE_POLICY)
     if policy not in CLOSE_POLICIES:
         policy = DEFAULT_CLOSE_POLICY
+    pdata = data.get("persistence")
+    pdata = pdata if isinstance(pdata, dict) else {}
+    ring = pdata.get("scrollback_bytes", PersistenceConfig.scrollback_bytes)
+    persistence = PersistenceConfig(
+        enabled=bool(pdata.get("enabled", False)),
+        scrollback_bytes=max(int(ring), 4096) if isinstance(ring, (int, float))
+        else PersistenceConfig.scrollback_bytes)
     return NativeConfig(
         pane_close_policy=policy,
         palette=normalize_palette(data.get("palette", DEFAULT_PALETTE)),
         pane_tints=bool(data.get("pane_tints", True)),
+        persistence=persistence,
         assistant=assistant_config.parse_assistant_config(
             data.get("assistant")),
     )
@@ -311,6 +330,25 @@ def default_control_socket_path(pid: int | None = None) -> str:
 
 def default_shell() -> str:
     return os.environ.get("SHELL") or "/bin/bash"
+
+
+def new_session_id() -> str:
+    """An opaque, collision-free id for a detachable ptyd session."""
+    return "s-" + os.urandom(8).hex()
+
+
+def ptyd_attach_argv(session_id, shell_argv, cwd, ring_bytes, *, create=True):
+    """The argv VTE spawns for a detachable pane: the ptyd attach client. On
+    create it starts the daemon (running `shell_argv`); otherwise it reattaches
+    to an existing session and `shell_argv` is ignored."""
+    python = sys.executable or "python3"
+    argv = [python, "-m", "agent_terminal.ptyd", "attach",
+            "--session", session_id, "--ring", str(int(ring_bytes))]
+    if cwd:
+        argv += ["--cwd", cwd]
+    if create:
+        argv += ["--create", "--", *shell_argv]
+    return argv
 
 
 def command_argv(options: LaunchOptions) -> list[str]:
@@ -1770,13 +1808,19 @@ def build_native_classes(g):
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
                      extra_env=None, on_exited=None, title=None, tint=0,
-                     assistant=None):
+                     assistant=None, persistence=None, session_id=None):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
             self.settings = settings
             self.tint = normalize_tint(tint)
             self.assistant = assistant
+            # Detachable-pane config + the ptyd session this pane's shell runs
+            # in (when enabled). A given/reattached id reuses an existing
+            # daemon; otherwise a fresh session is created.
+            self.persistence = persistence
+            self.reattach = session_id is not None
+            self.session_id = session_id or new_session_id()
             self.pid = None
             self._name_override = None   # manual/LLM pane name; wins over auto
             self.journal = None
@@ -1951,6 +1995,20 @@ def build_native_classes(g):
                 explicit_command=command is not None)
             envv = [f"{key}={value}" for key, value in env.items()]
             cwd = working_directory or os.getcwd()
+            # Detachable pane: run the shell inside a ptyd daemon so it survives
+            # the frontend; VTE spawns the thin attach client. Only the default
+            # shell is made persistent (not explicit one-off commands). Fails
+            # open to a direct spawn on any error.
+            persistence = getattr(self, "persistence", None)
+            if (command is None and persistence is not None
+                    and persistence.enabled):
+                try:
+                    argv = ptyd_attach_argv(
+                        self.session_id, argv, cwd,
+                        persistence.scrollback_bytes,
+                        create=not self.reattach)
+                except Exception:
+                    pass
             try:
                 self.terminal.spawn_async(
                     Vte.PtyFlags.DEFAULT, cwd, argv, envv,
@@ -3646,7 +3704,7 @@ def build_native_classes(g):
 
         def create_terminal_pane(self, command=None, working_directory=None,
                                  hold_on_exit=False, title=None,
-                                 extra_env=None):
+                                 extra_env=None, session_id=None):
             return TerminalPane(
                 self.options.settings, command=command,
                 working_directory=(working_directory
@@ -3656,7 +3714,9 @@ def build_native_classes(g):
                 on_exited=self._on_pane_exited, title=title,
                 tint=self._next_tint_slot(),
                 extra_env=extra_env,
-                assistant=self.options.native_config.assistant)
+                assistant=self.options.native_config.assistant,
+                persistence=self.options.native_config.persistence,
+                session_id=session_id)
 
         def _next_tint_slot(self):
             """Rotate through the tint ring so adjacent panes differ."""
@@ -3691,10 +3751,12 @@ def build_native_classes(g):
         # -- tabs -----------------------------------------------------------
 
         def add_terminal_tab(self, command=None, working_directory=None,
-                             hold_on_exit=False, title=None, extra_env=None):
+                             hold_on_exit=False, title=None, extra_env=None,
+                             session_id=None):
             pane = self.create_terminal_pane(command, working_directory,
                                              hold_on_exit, title,
-                                             extra_env=extra_env)
+                                             extra_env=extra_env,
+                                             session_id=session_id)
             tab = TerminalTab(self, pane)
             self._append_tab(tab)
             return tab
