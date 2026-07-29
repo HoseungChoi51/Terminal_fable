@@ -1,0 +1,25 @@
+# myget manifest — makes `myget install Terminal_fable` deterministic.
+# Schema: my_get_plan.md §4. [python] and [system] are local extensions; unknown
+# tables are ignored harmlessly by any tool that doesn't know them.
+
+[app]
+name = "agent-terminal"
+type = "python"
+
+[install]
+# Both console scripts declared in pyproject.toml's [project.scripts].
+bin = ["agent-terminal-native", "sls"]
+
+# --- Local extension: venv construction -------------------------------------------
+# PyGObject and the GTK4/VTE introspection bindings ship as system packages
+# (python3-gi, gir1.2-*), not PyPI wheels — pyproject.toml's `dependencies` is empty
+# for exactly that reason. The app's venv therefore has to see system site-packages
+# or `import gi` fails at startup.
+[python]
+system_site_packages = true
+
+# --- Local extension: apt dependencies --------------------------------------------
+# No PyPI dependencies to compile, so everything here is a runtime requirement.
+# `sls` needs only Python; `agent-terminal-native` needs the full GTK4/VTE stack.
+[system]
+runtime = ["python3-gi", "gir1.2-gtk-4.0", "gir1.2-vte-3.91", "gir1.2-adw-1"]
