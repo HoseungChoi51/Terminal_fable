@@ -31,6 +31,11 @@ trying to do.
 - **[decisions/](decisions/README.md)** — Architecture Decision Records explaining
   *why* the big choices were made (VTE for emulation, a custom layout widget, the
   GTK-free core).
+- **[terminal-internals-and-architecture.md](terminal-internals-and-architecture.md)**
+  — a from-first-principles explainer: TTY vs PTY vs shell vs emulator, why
+  disconnect kills a process (SIGHUP), why persistence needs a server-side
+  emulator, and how a terminal app would be architected as a thin frontend over
+  a persistent session server.
 - **[design-log/](design-log/README.md)** — a running record of *what was asked
   and why*, one entry per planning effort: the request (rephrased), the
   clarifying questions and the choices that shaped scope.
