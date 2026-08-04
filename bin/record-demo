@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Record the demo animation in docs/demo/ (see tools/demo/record_demo.py).
+#
+# Uses system python3 for the same reason the app launcher does: python3-gi
+# and the VTE introspection bindings live in system Python.
+#
+#   bin/record-demo              probe, record a take, QC it, encode
+#   bin/record-demo --probe      capture one frame and print timings
+#   bin/record-demo --encode-only  re-encode from the last master.mkv
+#
+# A take opens a real window for ~60s and takes keyboard focus. Leave the
+# machine alone while it runs.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+DRIVER="${REPO_ROOT}/tools/demo/record_demo.py"
+
+if [[ $# -gt 0 ]]; then
+  exec python3 "$DRIVER" "$@"
+fi
+
+python3 "$DRIVER" --probe
+exec python3 "$DRIVER" --record

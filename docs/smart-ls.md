@@ -19,6 +19,17 @@ bin/sls --show-hidden
 (Equivalent: `python -m agent_terminal.smart_ls`; `packaging/install.sh`
 also installs `~/.local/bin/sls`.)
 
+**Running from the source tree** (no `pip install`): the `sls` command isn't on
+`PATH` until it's installed. Either run `packaging/install.sh`, or symlink the
+launcher so the tree stays the source of truth:
+
+```bash
+ln -s "$PWD/bin/sls" ~/.local/bin/sls   # from the repo root
+```
+
+`sls` imports only `agent_terminal.tui_core` — it never loads the GTK terminal
+shell, so it starts fast and runs in any terminal, including over SSH.
+
 ## Smart truncation
 
 A single very long file name normally ruins `ls` output: every column

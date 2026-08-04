@@ -1,5 +1,13 @@
 # Terminal Fable
 
+![Terminal Fable: split panes, the sls browser, and in-place ask mode](docs/demo/demo.gif)
+
+*Split a pane, browse with `sls`, run the tests — then type half a command,
+press `Ctrl+?`, and ask. The copilot carries your draft in as context, answers
+with a risk badge, and `Take` puts the command on the prompt without running
+it.* ([WebP version](docs/demo/demo.webp) · recorded by
+[`bin/record-demo`](tools/demo/record_demo.py))
+
 A native Linux terminal with cmux-style split panes, built on GTK 4 and
 VTE. One window holds tabs; each tab holds an n-ary split tree of panes.
 Panes can be interactive terminals, rendered Markdown viewers, or native
