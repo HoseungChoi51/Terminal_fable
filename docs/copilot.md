@@ -257,8 +257,12 @@ newline, so nothing runs — or **Esc** to dismiss it. It shows only at a
 clean prompt and vanishes the moment anything is uncertain (you scroll,
 resize, run a program, use arrows/Ctrl-R/Tab, or the screen no longer
 matches what it thinks you typed). It never completes a destructive,
-privileged, or unknown command. Recipes are included only if you lower
-`suggestions.min_confidence` below `0.7`.
+privileged, or unknown command.
+
+What it completes *from* is now a persistent, directory-aware corpus rather
+than the current pane's in-memory history, and `min_confidence` is a real
+measurement of how far the winning candidate dominates its rivals — see
+**[completion.md](completion.md)** for the ranking model and its settings.
 
 This is the newest and least-proven feature — it is default-off pending
 a dogfooding soak (vim/tmux/paste/resize/wrapped lines). Enable it with:
@@ -356,7 +360,10 @@ missing or invalid values fall back to the defaults shown here:
 - `journal.output_tail_lines` — how many trailing output lines to keep.
 - `suggestions.menu` — enable the Ctrl+Shift+Space command menu.
 - `suggestions.ghost_text` — inline history completion at the cursor (default off).
-- `suggestions.min_confidence` — threshold for ghost text (lower to include recipes).
+- `suggestions.min_confidence` — how far the top candidate must dominate its
+  rivals before ghost text is shown (lower it to see more suggestions).
+- `completion.*` — the deterministic completion corpus and ranking model; see
+  [completion.md](completion.md).
 - `recipes.enabled` — include built-in recipes in the menu.
 - `titles.enabled` — infer tab titles from the journal.
 - `titles.min_interval_s` — minimum seconds between title changes (anti-flicker).

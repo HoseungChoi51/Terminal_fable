@@ -47,3 +47,4 @@ the user's own words. The broad roadmap remains in `copilot-development-plan.md`
 | [0012](0012-sls-decoupling.md) | Should `sls` be split out of the terminal? — keep + decouple | [0004](../decisions/0004-shared-tui-core-and-smart-ls.md) | Built |
 | [0013](0013-detachable-panes.md) | Make pane processes survive disconnection (tmux-style) | [0012](../decisions/0012-detachable-panes-pty-daemon.md) | Built (1–3) |
 | [0013](0013-readme-demo-recording.md) | A recorded demo of the usecase for the README | — | Built |
+| [0014](0014-non-llm-completion.md) | A robust non-LLM algorithm for command autocompletion | [0013](../decisions/0013-frecency-completion-corpus.md) | Built (A) |

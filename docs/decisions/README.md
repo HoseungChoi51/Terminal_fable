@@ -28,3 +28,4 @@ mark the old one `Superseded by NNNN`.
 | [0010](0010-in-place-ask-mode.md) | In-place ask mode instead of an assistant side panel | Accepted |
 | [0011](0011-workspaces-and-live-pane-moves.md) | Workspaces: episode resume, job grouping, live pane moves, naming | Accepted |
 | [0012](0012-detachable-panes-pty-daemon.md) | Detachable panes via an in-tree PTY daemon | Accepted |
+| [0013](0013-frecency-completion-corpus.md) | Deterministic completion: a persistent corpus ranked by frecency | Accepted |

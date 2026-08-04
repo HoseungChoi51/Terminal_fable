@@ -46,6 +46,9 @@ trying to do.
 - **[persistence.md](persistence.md)** — detachable panes: run each shell in a
   ptyd daemon so its process survives the frontend and can be reattached
   (tmux-style), with context replay. Opt-in.
+- **[completion.md](completion.md)** — deterministic (no-LLM) command
+  completion: the persistent corpus, the frecency + directory-scoping model,
+  how the confidence gate decides when ghost text appears, and how to tune it.
 
 ### …contribute to it
 
@@ -81,6 +84,7 @@ docs/
   native-terminal-mvp.md        usage guide & shortcuts
   smart-ls.md                   the sls full-screen directory browser
   copilot.md                    the context-aware terminal copilot
+  completion.md                 deterministic command completion (corpus + frecency)
   architecture.md               design & architecture overview
   developer-guide.md            setup, running, testing, conventions, workflow
   extending.md                  cookbook recipes for adding features
@@ -98,4 +102,8 @@ docs/
     0007-bash-shell-integration.md        auto-injected rcfile + termprops
     0008-llm-provider-and-remote-gate.md  OpenAI-compatible client, gated + redacted
     0009-session-persistence-format.md    dir-per-session under XDG data
+    0010-in-place-ask-mode.md             in-place ask bar, not a side panel
+    0011-workspaces-and-live-pane-moves.md  episodes, jobs, live pane moves
+    0012-detachable-panes-pty-daemon.md   in-tree PTY daemon for persistence
+    0013-frecency-completion-corpus.md    persistent corpus + frecency ranking
 ```

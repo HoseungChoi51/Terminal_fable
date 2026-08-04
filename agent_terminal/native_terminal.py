@@ -30,9 +30,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_terminal.copilot import config as assistant_config
+from agent_terminal.copilot import corpus as copilot_corpus
 from agent_terminal.copilot import journal as copilot_journal
 from agent_terminal.copilot import llm as copilot_llm
 from agent_terminal.copilot import prompt as copilot_prompt
+from agent_terminal.copilot import ranking as copilot_ranking
 from agent_terminal.copilot import redact as copilot_redact
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
@@ -1390,6 +1392,58 @@ def parse_control_message(line) -> dict | None:
     return data
 
 
+# -- completion corpus (process-wide) ------------------------------------
+#
+# One corpus is shared by every pane in every window: completion should
+# learn from everything you do, not per-pane. Loaded lazily on the first
+# pane that needs it, and (on first run only) seeded from ~/.bash_history.
+
+_COMPLETION_CORPUS = None
+_CORPUS_UNSAVED = 0
+# Commands between saves. The store is small and written atomically, and
+# commands arrive seconds apart, so this is cheap insurance against losing
+# a session's learning to a crash.
+CORPUS_SAVE_EVERY = 10
+
+
+def completion_corpus(assistant):
+    """The shared corpus, or None when disabled or unavailable.
+
+    Never raises: a completion cache must not be able to stop a terminal
+    from opening.
+    """
+    global _COMPLETION_CORPUS
+    if assistant is None or not assistant.completion.corpus:
+        return None
+    if _COMPLETION_CORPUS is None:
+        try:
+            _COMPLETION_CORPUS = copilot_corpus.open_corpus(
+                config=assistant.completion,
+                exclude_dirs=assistant.sessions.exclude_dirs,
+                exclude_commands=assistant.sessions.exclude_commands)
+        except Exception:
+            _COMPLETION_CORPUS = copilot_corpus.Corpus(
+                config=assistant.completion, seeded=True)
+    return _COMPLETION_CORPUS
+
+
+def save_completion_corpus(force=False):
+    """Flush the corpus every CORPUS_SAVE_EVERY ingests, or on demand."""
+    global _CORPUS_UNSAVED
+    corpus = _COMPLETION_CORPUS
+    if corpus is None or not corpus.dirty:
+        return
+    _CORPUS_UNSAVED += 1
+    if not force and _CORPUS_UNSAVED < CORPUS_SAVE_EVERY:
+        return
+    _CORPUS_UNSAVED = 0
+    try:
+        corpus.prune()
+        copilot_corpus.save(corpus)
+    except Exception:
+        pass
+
+
 class ControlSocketServer:
     """Accept JSON-line control messages on a Unix socket.
 
@@ -1859,6 +1913,9 @@ def build_native_classes(g):
                     # the visible overlay is gated on ghost_text.
                     self._tracker = copilot_prompt.PromptTracker()
                     self.terminal.connect("commit", self._on_commit)
+                    # Feed every finished command into the durable corpus
+                    # that frecency ranking scores against.
+                    self.journal.sink = self._ingest_completion
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -2282,10 +2339,7 @@ def build_native_classes(g):
             if not visible.endswith(typed):
                 self._hide_ghost()
                 return
-            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
-            suffix = copilot_suggest.ghost_completion(
-                typed, history=history,
-                min_confidence=self.assistant.suggestions.min_confidence)
+            suffix = self._ghost_for(typed)
             if not suffix:
                 if label.get_visible():
                     label.set_visible(False)
@@ -2295,6 +2349,42 @@ def build_native_classes(g):
             label.set_text(suffix)
             self._position_ghost(col, row)
             label.set_visible(True)
+
+        def _ingest_completion(self, record, previous):
+            """Journal sink: record a finished command in the corpus."""
+            corpus = completion_corpus(self.assistant)
+            if corpus is None:
+                return
+            sessions = self.assistant.sessions
+            corpus.add(record.cmd, cwd=record.cwd,
+                       exit_code=record.exit_code,
+                       when=record.started_at, prev=previous,
+                       exclude_dirs=sessions.exclude_dirs,
+                       exclude_commands=sessions.exclude_commands)
+            save_completion_corpus()
+
+        def _completion_context(self):
+            """(cwd, project_root, previous command) for ranking."""
+            cwd = self.current_directory()
+            last = self.journal.last_record() if self.journal else None
+            return (cwd, copilot_ranking.find_project_root(cwd),
+                    last.cmd if last is not None else None)
+
+        def _ghost_for(self, typed):
+            """The ghost suffix for `typed`, corpus-ranked when available."""
+            corpus = completion_corpus(self.assistant)
+            min_confidence = self.assistant.suggestions.min_confidence
+            if corpus is not None and len(corpus):
+                cwd, root, previous = self._completion_context()
+                return copilot_suggest.corpus_ghost_completion(
+                    typed, corpus, cwd=cwd, project_root=root,
+                    config=self.assistant.completion, prev_command=previous,
+                    min_confidence=min_confidence)
+            # No corpus (disabled, or empty on a first run): fall back to
+            # this pane's own in-memory history.
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            return copilot_suggest.ghost_completion(
+                typed, history=history, min_confidence=min_confidence)
 
         def _position_ghost(self, col, row):
             try:
@@ -5013,27 +5103,50 @@ def build_native_classes(g):
         def _gather_menu_suggestions(self, query, *, cwd, project,
                                      readme_blocks, providers, history,
                                      recipes, typo_enabled, limit=12):
-            """Merge typo, context, and fuzzy suggestions for the menu."""
-            merged, seen = [], set()
+            """Merge typo, context, and ranked suggestions for the menu.
 
-            def take(items):
-                for suggestion in items:
-                    if suggestion.command not in seen:
-                        seen.add(suggestion.command)
-                        merged.append(suggestion)
-
+            Ordering is banded, not source-ordered: a typo fix always
+            leads, a concrete argument completion (path/branch/host) beats
+            everything else, and below that your own habits compete with
+            project/README commands and recipes on normalized score.
+            """
+            corrections = []
             if typo_enabled and query.strip():
                 correction = copilot_typo.correct_command(
                     query, known=known_commands(), history=history)
                 if correction is not None and correction.reason == "command":
-                    take([copilot_suggest.make_suggestion(
-                        correction.corrected, "did you mean", score=9.0)])
-            take(copilot_context.menu_suggestions(
+                    corrections.append(copilot_suggest.make_suggestion(
+                        correction.corrected, "did you mean", score=9.0))
+
+            context_items = copilot_context.menu_suggestions(
                 query, cwd, project=project, readme_blocks=readme_blocks,
-                providers=providers))
-            take(copilot_suggest.build_suggestions(
-                query, recipes=recipes, history=history))
-            return merged[:limit]
+                providers=providers)
+            # menu_suggestions emits argument completions only when an
+            # argument is actually being typed, and project/README
+            # commands only when one is not — so the expectation kind
+            # tells us which band its output belongs in.
+            spec = copilot_context.argument_expectation(query)
+            context_band = (copilot_suggest.BAND_ARGUMENT
+                            if spec.kind != copilot_context.NONE
+                            else copilot_suggest.BAND_PRIMARY)
+
+            corpus = completion_corpus(self.assistant)
+            if corpus is not None and len(corpus):
+                _, root, previous = self._completion_context()
+                ranked = copilot_suggest.build_corpus_suggestions(
+                    query, corpus, recipes=recipes, cwd=cwd,
+                    project_root=root, config=self.assistant.completion,
+                    prev_command=previous, limit=limit)
+            else:
+                ranked = copilot_suggest.normalized(
+                    copilot_suggest.build_suggestions(
+                        query, recipes=recipes, history=history))
+
+            return copilot_suggest.merge_suggestions(
+                (copilot_suggest.BAND_CORRECTION, corrections),
+                (context_band, context_items),
+                (copilot_suggest.BAND_PRIMARY, ranked),
+                limit=limit)
 
         def _read_readme(self, cwd):
             if not cwd:
@@ -5860,6 +5973,7 @@ def build_native_classes(g):
             for window in list(self.get_windows() or []):
                 if isinstance(window, NativeTerminalWindow):
                     window.flush_all_sessions()
+            save_completion_corpus(force=True)
             if self._socket_server is not None:
                 self._socket_server.close()
                 self._socket_server = None
