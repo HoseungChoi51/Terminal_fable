@@ -31,9 +31,24 @@ trying to do.
 - **[decisions/](decisions/README.md)** — Architecture Decision Records explaining
   *why* the big choices were made (VTE for emulation, a custom layout widget, the
   GTK-free core).
+- **[terminal-internals-and-architecture.md](terminal-internals-and-architecture.md)**
+  — a from-first-principles explainer: TTY vs PTY vs shell vs emulator, why
+  disconnect kills a process (SIGHUP), why persistence needs a server-side
+  emulator, and how a terminal app would be architected as a thin frontend over
+  a persistent session server.
 - **[design-log/](design-log/README.md)** — a running record of *what was asked
   and why*, one entry per planning effort: the request (rephrased), the
   clarifying questions and the choices that shaped scope.
+- **[uutils-coreutils.md](uutils-coreutils.md)** — this machine runs the Rust
+  (uutils) coreutils by default: the setup, the compatibility caveat, the
+  fallback plan, and where to report coreutils bugs (upstream to uutils, **not**
+  Terminal Fable).
+- **[persistence.md](persistence.md)** — detachable panes: run each shell in a
+  ptyd daemon so its process survives the frontend and can be reattached
+  (tmux-style), with context replay. Opt-in.
+- **[completion.md](completion.md)** — deterministic (no-LLM) command
+  completion: the persistent corpus, the frecency + directory-scoping model,
+  how the confidence gate decides when ghost text appears, and how to tune it.
 
 ### …contribute to it
 
@@ -43,6 +58,9 @@ trying to do.
 - **[extending.md](extending.md)** — cookbook recipes: add an action + shortcut, a
   new pane type, a palette, a config option, a control-socket command, or a layout
   operation.
+- **[demo/README.md](demo/README.md)** — how the README animation is recorded:
+  the storyboard, the in-process driver, and why the frames come out of the
+  window's render tree instead of a screen grab.
 
 ### …rebuild it from scratch
 
@@ -66,9 +84,13 @@ docs/
   native-terminal-mvp.md        usage guide & shortcuts
   smart-ls.md                   the sls full-screen directory browser
   copilot.md                    the context-aware terminal copilot
+  completion.md                 deterministic command completion (corpus + frecency)
   architecture.md               design & architecture overview
   developer-guide.md            setup, running, testing, conventions, workflow
   extending.md                  cookbook recipes for adding features
+  demo/
+    README.md                   how the README animation is recorded
+    demo.gif, demo.webp         the animation itself
   decisions/
     README.md                   ADR index
     0001-…-vte.md               delegate terminal emulation to VTE
@@ -80,4 +102,8 @@ docs/
     0007-bash-shell-integration.md        auto-injected rcfile + termprops
     0008-llm-provider-and-remote-gate.md  OpenAI-compatible client, gated + redacted
     0009-session-persistence-format.md    dir-per-session under XDG data
+    0010-in-place-ask-mode.md             in-place ask bar, not a side panel
+    0011-workspaces-and-live-pane-moves.md  episodes, jobs, live pane moves
+    0012-detachable-panes-pty-daemon.md   in-tree PTY daemon for persistence
+    0013-frecency-completion-corpus.md    persistent corpus + frecency ranking
 ```

@@ -725,7 +725,11 @@ class SourceGuardrailTests(unittest.TestCase):
     def test_terminal_uses_vte(self):
         self.assertIn("Vte.Terminal()", SOURCE)
         self.assertIn("spawn_async", SOURCE)
-        self.assertIn(nt.CONTROL_SOCKET_ENV, SOURCE)
+        # The control-socket env var now lives in tui_core; the terminal still
+        # exports it to child processes (re-exported name used in the spawn).
+        self.assertEqual(nt.CONTROL_SOCKET_ENV,
+                         "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET")
+        self.assertIn("env[CONTROL_SOCKET_ENV] = control_socket_path", SOURCE)
 
     def test_picker_window_is_transient(self):
         self.assertIn("set_transient_for(", SOURCE)
@@ -789,6 +793,37 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def _copilot_status_text(self", SOURCE)
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
+
+    def test_persistent_pane_spawn_wired(self):
+        # Persistence routes the shell through the ptyd attach client (opt-in,
+        # fails open); reattach skips --create.
+        self.assertIn("from agent_terminal import ptyd", SOURCE)
+        self.assertIn("class PersistenceConfig", SOURCE)
+        self.assertIn("def ptyd_attach_argv(session_id, shell_argv, cwd",
+                      SOURCE)
+        self.assertIn("argv = ptyd_attach_argv(", SOURCE)
+        self.assertIn("create=not self.reattach", SOURCE)
+        # only the default shell is persisted, and any failure falls back to a
+        # direct spawn
+        spawn = SOURCE.split("def _spawn(self", 1)[1].split(
+            "spawn_async", 1)[0]
+        self.assertIn("command is None and persistence is not None", spawn)
+        self.assertIn("except Exception:", spawn)      # fail open
+
+    def test_reattach_and_detach_wired(self):
+        # Detachable sessions surface for reattach/kill; detach closes the
+        # frontend but leaves the process; a startup nudge points at them.
+        self.assertIn("def _orphaned_sessions(self)", SOURCE)
+        self.assertIn("def _reattach_session(self, info)", SOURCE)
+        self.assertIn("def detach_active_pane(self)", SOURCE)
+        self.assertIn("def _maybe_prompt_reattach(self)", SOURCE)
+        self.assertIn("ptyd.list_sessions()", SOURCE)
+        self.assertIn("ptyd.kill_session(info.id)", SOURCE)
+        self.assertIn("pane-detach", nt.ACTION_NAMES)
+        self.assertIn("add_terminal_tab(working_directory=cwd, "
+                      "session_id=info.id", SOURCE)
+        # a reattach must still route through ptyd even if the default is off
+        self.assertIn("persistence.enabled or self.reattach", SOURCE)
 
     def test_naming_wired(self):
         # Manual rename + LLM name suggestions; a name overrides the inferred
@@ -999,6 +1034,51 @@ class ShortcutHintDetectorTests(unittest.TestCase):
     def test_hint_text_names_the_shortcut(self):
         self.assertIn("Ctrl+Shift+H", nt.SHORTCUT_HINT_TEXT)
         self.assertIn("Esc", nt.SHORTCUT_HINT_TEXT)
+
+
+class PersistenceConfigTests(unittest.TestCase):
+    def _load(self, data):
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as handle:
+            json.dump(data, handle)
+            path = handle.name
+        try:
+            return nt.load_native_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_default_off(self):
+        cfg = nt.load_native_config("/nonexistent")
+        self.assertFalse(cfg.persistence.enabled)
+        self.assertEqual(cfg.persistence.scrollback_bytes, 512 * 1024)
+
+    def test_enabled_and_ring(self):
+        cfg = self._load({"persistence": {"enabled": True,
+                                          "scrollback_bytes": 100000}})
+        self.assertTrue(cfg.persistence.enabled)
+        self.assertEqual(cfg.persistence.scrollback_bytes, 100000)
+
+    def test_ring_clamped_and_malformed_ignored(self):
+        self.assertEqual(self._load(
+            {"persistence": {"scrollback_bytes": 10}}
+        ).persistence.scrollback_bytes, 4096)
+        self.assertEqual(self._load(
+            {"persistence": {"scrollback_bytes": "x"}}
+        ).persistence.scrollback_bytes, 512 * 1024)
+        self.assertFalse(self._load(
+            {"persistence": "nope"}).persistence.enabled)
+
+    def test_attach_argv_shape(self):
+        argv = nt.ptyd_attach_argv("s-abc", ["/bin/bash", "-i"], "/tmp", 4096)
+        self.assertIn("-m", argv)
+        self.assertIn("agent_terminal.ptyd", argv)
+        self.assertEqual(argv[argv.index("--session") + 1], "s-abc")
+        self.assertIn("--create", argv)
+        self.assertEqual(argv[-2:], ["/bin/bash", "-i"])
+        # reattach form drops --create (and the shell argv)
+        re = nt.ptyd_attach_argv("s-abc", ["/bin/bash"], "/tmp", 4096,
+                                 create=False)
+        self.assertNotIn("--create", re)
 
 
 if __name__ == "__main__":

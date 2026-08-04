@@ -30,9 +30,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_terminal.copilot import config as assistant_config
+from agent_terminal.copilot import corpus as copilot_corpus
 from agent_terminal.copilot import journal as copilot_journal
 from agent_terminal.copilot import llm as copilot_llm
 from agent_terminal.copilot import prompt as copilot_prompt
+from agent_terminal.copilot import ranking as copilot_ranking
 from agent_terminal.copilot import redact as copilot_redact
 from agent_terminal.copilot import recipes as copilot_recipes
 from agent_terminal.copilot import sessions as copilot_sessions
@@ -46,11 +48,16 @@ from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
 from agent_terminal.copilot import resume as copilot_resume
 from agent_terminal.copilot import jobs as copilot_jobs
+from agent_terminal import ptyd
+# Re-exported from the shared TUI core so the standalone subprocesses depend
+# only on tui_core; kept importable from here for internal use + back-compat.
+from agent_terminal.tui_core import (  # noqa: F401
+    CONTROL_SOCKET_ENV, IMAGE_EXTENSIONS, MARKDOWN_EXTENSIONS,
+    is_image_path, is_markdown_path)
 
 VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
 APP_TITLE = "Agent Terminal"
-CONTROL_SOCKET_ENV = "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET"
 CONFIG_PATH = "~/.config/agent-terminal/native.json"
 
 
@@ -256,10 +263,20 @@ class TerminalSettings:
 
 
 @dataclass(frozen=True)
+class PersistenceConfig:
+    """Detachable panes: run each shell inside a ptyd daemon so it survives
+    the frontend and can be reattached. Off by default (opt-in) so the
+    default spawn path — and the dogfooding launchability — is unchanged."""
+    enabled: bool = False
+    scrollback_bytes: int = 512 * 1024
+
+
+@dataclass(frozen=True)
 class NativeConfig:
     pane_close_policy: str = DEFAULT_CLOSE_POLICY
     palette: str = DEFAULT_PALETTE
     pane_tints: bool = True
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     assistant: assistant_config.AssistantConfig = field(
         default_factory=assistant_config.AssistantConfig)
 
@@ -289,10 +306,18 @@ def load_native_config(path: str | os.PathLike | None = None) -> NativeConfig:
     policy = data.get("pane_close_policy", DEFAULT_CLOSE_POLICY)
     if policy not in CLOSE_POLICIES:
         policy = DEFAULT_CLOSE_POLICY
+    pdata = data.get("persistence")
+    pdata = pdata if isinstance(pdata, dict) else {}
+    ring = pdata.get("scrollback_bytes", PersistenceConfig.scrollback_bytes)
+    persistence = PersistenceConfig(
+        enabled=bool(pdata.get("enabled", False)),
+        scrollback_bytes=max(int(ring), 4096) if isinstance(ring, (int, float))
+        else PersistenceConfig.scrollback_bytes)
     return NativeConfig(
         pane_close_policy=policy,
         palette=normalize_palette(data.get("palette", DEFAULT_PALETTE)),
         pane_tints=bool(data.get("pane_tints", True)),
+        persistence=persistence,
         assistant=assistant_config.parse_assistant_config(
             data.get("assistant")),
     )
@@ -307,6 +332,25 @@ def default_control_socket_path(pid: int | None = None) -> str:
 
 def default_shell() -> str:
     return os.environ.get("SHELL") or "/bin/bash"
+
+
+def new_session_id() -> str:
+    """An opaque, collision-free id for a detachable ptyd session."""
+    return "s-" + os.urandom(8).hex()
+
+
+def ptyd_attach_argv(session_id, shell_argv, cwd, ring_bytes, *, create=True):
+    """The argv VTE spawns for a detachable pane: the ptyd attach client. On
+    create it starts the daemon (running `shell_argv`); otherwise it reattaches
+    to an existing session and `shell_argv` is ignored."""
+    python = sys.executable or "python3"
+    argv = [python, "-m", "agent_terminal.ptyd", "attach",
+            "--session", session_id, "--ring", str(int(ring_bytes))]
+    if cwd:
+        argv += ["--cwd", cwd]
+    if create:
+        argv += ["--create", "--", *shell_argv]
+    return argv
 
 
 def command_argv(options: LaunchOptions) -> list[str]:
@@ -970,20 +1014,10 @@ def layout_fit_focused(root, pane_id, share=FIT_FOCUSED_SHARE):
 # Markdown helpers
 # ---------------------------------------------------------------------------
 
-MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mkd")
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 SAFE_URI_SCHEMES = ("http", "https", "mailto", "file")
 
 HEADING_POINT_SIZES = {1: 22.0, 2: 18.0, 3: 15.0, 4: 13.0, 5: 12.0, 6: 11.0}
 BASE_TEXT_POINT_SIZE = 10.5
-
-
-def is_markdown_path(path) -> bool:
-    return str(path).lower().endswith(MARKDOWN_EXTENSIONS)
-
-
-def is_image_path(path) -> bool:
-    return str(path).lower().endswith(IMAGE_EXTENSIONS)
 
 
 def heading_point_size(level: int, zoom: float = 1.0) -> float:
@@ -1262,6 +1296,7 @@ ACTION_NAMES = (
     "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
     "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
     "pane-eject", "pane-send", "pane-rename", "window-rename", "workspace-name",
+    "pane-detach",
     "shortcuts", "preferences", "about", "quit",
 )
 
@@ -1355,6 +1390,58 @@ def parse_control_message(line) -> dict | None:
     if path is not None and not isinstance(path, str):
         return None
     return data
+
+
+# -- completion corpus (process-wide) ------------------------------------
+#
+# One corpus is shared by every pane in every window: completion should
+# learn from everything you do, not per-pane. Loaded lazily on the first
+# pane that needs it, and (on first run only) seeded from ~/.bash_history.
+
+_COMPLETION_CORPUS = None
+_CORPUS_UNSAVED = 0
+# Commands between saves. The store is small and written atomically, and
+# commands arrive seconds apart, so this is cheap insurance against losing
+# a session's learning to a crash.
+CORPUS_SAVE_EVERY = 10
+
+
+def completion_corpus(assistant):
+    """The shared corpus, or None when disabled or unavailable.
+
+    Never raises: a completion cache must not be able to stop a terminal
+    from opening.
+    """
+    global _COMPLETION_CORPUS
+    if assistant is None or not assistant.completion.corpus:
+        return None
+    if _COMPLETION_CORPUS is None:
+        try:
+            _COMPLETION_CORPUS = copilot_corpus.open_corpus(
+                config=assistant.completion,
+                exclude_dirs=assistant.sessions.exclude_dirs,
+                exclude_commands=assistant.sessions.exclude_commands)
+        except Exception:
+            _COMPLETION_CORPUS = copilot_corpus.Corpus(
+                config=assistant.completion, seeded=True)
+    return _COMPLETION_CORPUS
+
+
+def save_completion_corpus(force=False):
+    """Flush the corpus every CORPUS_SAVE_EVERY ingests, or on demand."""
+    global _CORPUS_UNSAVED
+    corpus = _COMPLETION_CORPUS
+    if corpus is None or not corpus.dirty:
+        return
+    _CORPUS_UNSAVED += 1
+    if not force and _CORPUS_UNSAVED < CORPUS_SAVE_EVERY:
+        return
+    _CORPUS_UNSAVED = 0
+    try:
+        corpus.prune()
+        copilot_corpus.save(corpus)
+    except Exception:
+        pass
 
 
 class ControlSocketServer:
@@ -1776,13 +1863,19 @@ def build_native_classes(g):
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
                      extra_env=None, on_exited=None, title=None, tint=0,
-                     assistant=None):
+                     assistant=None, persistence=None, session_id=None):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
             self.settings = settings
             self.tint = normalize_tint(tint)
             self.assistant = assistant
+            # Detachable-pane config + the ptyd session this pane's shell runs
+            # in (when enabled). A given/reattached id reuses an existing
+            # daemon; otherwise a fresh session is created.
+            self.persistence = persistence
+            self.reattach = session_id is not None
+            self.session_id = session_id or new_session_id()
             self.pid = None
             self._name_override = None   # manual/LLM pane name; wins over auto
             self.journal = None
@@ -1820,6 +1913,9 @@ def build_native_classes(g):
                     # the visible overlay is gated on ghost_text.
                     self._tracker = copilot_prompt.PromptTracker()
                     self.terminal.connect("commit", self._on_commit)
+                    # Feed every finished command into the durable corpus
+                    # that frecency ranking scores against.
+                    self.journal.sink = self._ingest_completion
             scroller = Gtk.ScrolledWindow()
             scroller.set_child(self.terminal)
             # VTE consumes wheel events itself, so GTK's overlay scrollbar
@@ -1957,6 +2053,23 @@ def build_native_classes(g):
                 explicit_command=command is not None)
             envv = [f"{key}={value}" for key, value in env.items()]
             cwd = working_directory or os.getcwd()
+            # Detachable pane: run the shell inside a ptyd daemon so it survives
+            # the frontend; VTE spawns the thin attach client. Only the default
+            # shell is made persistent (not explicit one-off commands). Fails
+            # open to a direct spawn on any error.
+            persistence = getattr(self, "persistence", None)
+            ring = persistence.scrollback_bytes if persistence else 0
+            # Route through ptyd for a new persistent shell, or whenever this
+            # pane is reattaching an existing session (even if the default is
+            # off — the session already exists).
+            if (command is None and persistence is not None
+                    and (persistence.enabled or self.reattach)):
+                try:
+                    argv = ptyd_attach_argv(
+                        self.session_id, argv, cwd, ring,
+                        create=not self.reattach)
+                except Exception:
+                    pass
             try:
                 self.terminal.spawn_async(
                     Vte.PtyFlags.DEFAULT, cwd, argv, envv,
@@ -2226,10 +2339,7 @@ def build_native_classes(g):
             if not visible.endswith(typed):
                 self._hide_ghost()
                 return
-            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
-            suffix = copilot_suggest.ghost_completion(
-                typed, history=history,
-                min_confidence=self.assistant.suggestions.min_confidence)
+            suffix = self._ghost_for(typed)
             if not suffix:
                 if label.get_visible():
                     label.set_visible(False)
@@ -2239,6 +2349,42 @@ def build_native_classes(g):
             label.set_text(suffix)
             self._position_ghost(col, row)
             label.set_visible(True)
+
+        def _ingest_completion(self, record, previous):
+            """Journal sink: record a finished command in the corpus."""
+            corpus = completion_corpus(self.assistant)
+            if corpus is None:
+                return
+            sessions = self.assistant.sessions
+            corpus.add(record.cmd, cwd=record.cwd,
+                       exit_code=record.exit_code,
+                       when=record.started_at, prev=previous,
+                       exclude_dirs=sessions.exclude_dirs,
+                       exclude_commands=sessions.exclude_commands)
+            save_completion_corpus()
+
+        def _completion_context(self):
+            """(cwd, project_root, previous command) for ranking."""
+            cwd = self.current_directory()
+            last = self.journal.last_record() if self.journal else None
+            return (cwd, copilot_ranking.find_project_root(cwd),
+                    last.cmd if last is not None else None)
+
+        def _ghost_for(self, typed):
+            """The ghost suffix for `typed`, corpus-ranked when available."""
+            corpus = completion_corpus(self.assistant)
+            min_confidence = self.assistant.suggestions.min_confidence
+            if corpus is not None and len(corpus):
+                cwd, root, previous = self._completion_context()
+                return copilot_suggest.corpus_ghost_completion(
+                    typed, corpus, cwd=cwd, project_root=root,
+                    config=self.assistant.completion, prev_command=previous,
+                    min_confidence=min_confidence)
+            # No corpus (disabled, or empty on a first run): fall back to
+            # this pane's own in-memory history.
+            history = [r.cmd for r in self.journal.snapshot() if r.cmd]
+            return copilot_suggest.ghost_completion(
+                typed, history=history, min_confidence=min_confidence)
 
         def _position_ghost(self, col, row):
             try:
@@ -3341,6 +3487,10 @@ def build_native_classes(g):
                     SESSION_CHECKPOINT_SECONDS, self._session_tick)
                 self.connect("close-request", self._on_close_request)
             self._open_initial_tabs()
+            # One-shot nudge if processes are still detached in the background
+            # (survived a previous disconnect) and aren't currently open.
+            self._reattach_prompted = False
+            GLib.timeout_add_seconds(1, self._maybe_prompt_reattach)
 
         def _on_close_request(self, *args):
             self.flush_all_sessions()
@@ -3379,6 +3529,7 @@ def build_native_classes(g):
             view.append("Name Workspace (AI)…", "win.workspace-name")
             view.append("Eject Pane to New Window", "win.pane-eject")
             view.append("Send Pane to Window…", "win.pane-send")
+            view.append("Detach Pane (keep running)", "win.pane-detach")
             view.append("Copilot Model", "win.copilot-model")
             view.append("Toggle Context Mode", "win.copilot-digest-mode")
             view.append("Session Summary…", "win.copilot-summary")
@@ -3652,7 +3803,7 @@ def build_native_classes(g):
 
         def create_terminal_pane(self, command=None, working_directory=None,
                                  hold_on_exit=False, title=None,
-                                 extra_env=None):
+                                 extra_env=None, session_id=None):
             return TerminalPane(
                 self.options.settings, command=command,
                 working_directory=(working_directory
@@ -3662,7 +3813,9 @@ def build_native_classes(g):
                 on_exited=self._on_pane_exited, title=title,
                 tint=self._next_tint_slot(),
                 extra_env=extra_env,
-                assistant=self.options.native_config.assistant)
+                assistant=self.options.native_config.assistant,
+                persistence=self.options.native_config.persistence,
+                session_id=session_id)
 
         def _next_tint_slot(self):
             """Rotate through the tint ring so adjacent panes differ."""
@@ -3697,10 +3850,12 @@ def build_native_classes(g):
         # -- tabs -----------------------------------------------------------
 
         def add_terminal_tab(self, command=None, working_directory=None,
-                             hold_on_exit=False, title=None, extra_env=None):
+                             hold_on_exit=False, title=None, extra_env=None,
+                             session_id=None):
             pane = self.create_terminal_pane(command, working_directory,
                                              hold_on_exit, title,
-                                             extra_env=extra_env)
+                                             extra_env=extra_env,
+                                             session_id=session_id)
             tab = TerminalTab(self, pane)
             self._append_tab(tab)
             return tab
@@ -4184,6 +4339,8 @@ def build_native_classes(g):
                 self.rename_current_window()
             elif name == "workspace-name":
                 self.show_name_workspace()
+            elif name == "pane-detach":
+                self.detach_active_pane()
             elif name == "copilot-summary":
                 self.show_session_summary()
             elif name == "copilot-pause":
@@ -4946,27 +5103,50 @@ def build_native_classes(g):
         def _gather_menu_suggestions(self, query, *, cwd, project,
                                      readme_blocks, providers, history,
                                      recipes, typo_enabled, limit=12):
-            """Merge typo, context, and fuzzy suggestions for the menu."""
-            merged, seen = [], set()
+            """Merge typo, context, and ranked suggestions for the menu.
 
-            def take(items):
-                for suggestion in items:
-                    if suggestion.command not in seen:
-                        seen.add(suggestion.command)
-                        merged.append(suggestion)
-
+            Ordering is banded, not source-ordered: a typo fix always
+            leads, a concrete argument completion (path/branch/host) beats
+            everything else, and below that your own habits compete with
+            project/README commands and recipes on normalized score.
+            """
+            corrections = []
             if typo_enabled and query.strip():
                 correction = copilot_typo.correct_command(
                     query, known=known_commands(), history=history)
                 if correction is not None and correction.reason == "command":
-                    take([copilot_suggest.make_suggestion(
-                        correction.corrected, "did you mean", score=9.0)])
-            take(copilot_context.menu_suggestions(
+                    corrections.append(copilot_suggest.make_suggestion(
+                        correction.corrected, "did you mean", score=9.0))
+
+            context_items = copilot_context.menu_suggestions(
                 query, cwd, project=project, readme_blocks=readme_blocks,
-                providers=providers))
-            take(copilot_suggest.build_suggestions(
-                query, recipes=recipes, history=history))
-            return merged[:limit]
+                providers=providers)
+            # menu_suggestions emits argument completions only when an
+            # argument is actually being typed, and project/README
+            # commands only when one is not — so the expectation kind
+            # tells us which band its output belongs in.
+            spec = copilot_context.argument_expectation(query)
+            context_band = (copilot_suggest.BAND_ARGUMENT
+                            if spec.kind != copilot_context.NONE
+                            else copilot_suggest.BAND_PRIMARY)
+
+            corpus = completion_corpus(self.assistant)
+            if corpus is not None and len(corpus):
+                _, root, previous = self._completion_context()
+                ranked = copilot_suggest.build_corpus_suggestions(
+                    query, corpus, recipes=recipes, cwd=cwd,
+                    project_root=root, config=self.assistant.completion,
+                    prev_command=previous, limit=limit)
+            else:
+                ranked = copilot_suggest.normalized(
+                    copilot_suggest.build_suggestions(
+                        query, recipes=recipes, history=history))
+
+            return copilot_suggest.merge_suggestions(
+                (copilot_suggest.BAND_CORRECTION, corrections),
+                (context_band, context_items),
+                (copilot_suggest.BAND_PRIMARY, ranked),
+                limit=limit)
 
         def _read_readme(self, cwd):
             if not cwd:
@@ -5099,6 +5279,20 @@ def build_native_classes(g):
             box.set_margin_bottom(8)
             box.set_margin_start(8)
             box.set_margin_end(8)
+            # Detachable sessions still running in the background (their
+            # processes survived a disconnect) → reattach or kill. Only those
+            # not currently open in a pane.
+            live = self._orphaned_sessions()
+            if live:
+                heading = Gtk.Label(label="Running (detached)")
+                heading.set_xalign(0.0)
+                heading.add_css_class("heading")
+                box.append(heading)
+                live_list = Gtk.ListBox()
+                live_list.set_selection_mode(Gtk.SelectionMode.NONE)
+                for info in live:
+                    live_list.append(self._ptyd_session_row(info, live_list))
+                box.append(live_list)
             # Detected workspaces (sessions that were active together) → open
             # them as one bounded split-pane window.
             ws = self.options.native_config.assistant.workspace
@@ -5144,6 +5338,105 @@ def build_native_classes(g):
             box.append(button)
             row.set_child(box)
             return row
+
+        # -- detachable sessions: reattach / detach / kill (persistence P3) ---
+
+        def _attached_session_ids(self):
+            ids = set()
+            for window in (self._app.get_windows() or []):
+                if not isinstance(window, NativeTerminalWindow):
+                    continue
+                for tab in window.tabs:
+                    for pane in tab.panes.values():
+                        sid = getattr(pane, "session_id", None)
+                        if sid and getattr(pane, "kind", None) == "terminal":
+                            ids.add(sid)
+            return ids
+
+        def _orphaned_sessions(self):
+            """Live ptyd sessions not currently open in any pane — the ones a
+            reattach can bring back."""
+            attached = self._attached_session_ids()
+            try:
+                return [s for s in ptyd.list_sessions()
+                        if s.id not in attached]
+            except Exception:
+                return []
+
+        def _ptyd_session_row(self, info, listbox):
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+            box.set_margin_start(10)
+            box.set_margin_end(6)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            text.set_hexpand(True)
+            title = Gtk.Label(label=info.cwd or "session")
+            title.set_xalign(0.0)
+            title.add_css_class("heading")
+            title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            meta = Gtk.Label(label=f"pid {info.child_pid or '?'} · "
+                             + (" ".join(info.argv) or "shell"))
+            meta.set_xalign(0.0)
+            meta.add_css_class("dim-label")
+            meta.set_ellipsize(Pango.EllipsizeMode.END)
+            text.append(title)
+            text.append(meta)
+            reattach = Gtk.Button(label="Reattach")
+            reattach.connect("clicked", lambda *_: self._reattach_session(info))
+            kill = Gtk.Button(label="Kill")
+            kill.add_css_class("destructive-action")
+
+            def do_kill(*_):
+                ptyd.kill_session(info.id)
+                listbox.remove(row)
+
+            kill.connect("clicked", do_kill)
+            box.append(text)
+            box.append(reattach)
+            box.append(kill)
+            row.set_child(box)
+            return row
+
+        def _reattach_session(self, info):
+            cwd = info.cwd if info.cwd and os.path.isdir(info.cwd) else None
+            title = (os.path.basename(info.cwd.rstrip("/"))
+                     if info.cwd else None)
+            self.add_terminal_tab(working_directory=cwd, session_id=info.id,
+                                  title=title)
+            if self._sessions_dialog is not None:
+                self._sessions_dialog.close()
+
+        def detach_active_pane(self):
+            """Close a detachable pane's frontend but leave its process running
+            in the background (reattach later from the session browser)."""
+            tab = self.active_tab()
+            pane = tab.active_pane() if tab else None
+            if pane is None or pane.kind != "terminal":
+                return
+            sid = getattr(pane, "session_id", None)
+            detachable = bool(sid) and ptyd.session_alive(sid)
+            tab.close_pane(pane.pane_id)      # the daemon + child survive
+            if detachable:
+                survivor = self._recent_terminal_pane()
+                if survivor is not None:
+                    self._flash_pane(
+                        survivor, "Detached — reattach from Ctrl+Shift+S")
+
+        def _maybe_prompt_reattach(self):
+            if getattr(self, "_reattach_prompted", False):
+                return False
+            self._reattach_prompted = True
+            count = len(self._orphaned_sessions())
+            if count:
+                pane = self._recent_terminal_pane()
+                if pane is not None:
+                    self._flash_pane(
+                        pane, f"{count} detached session"
+                        + ("" if count == 1 else "s")
+                        + " running — Ctrl+Shift+S to reattach", duration=4500)
+            return False
 
         def _session_row(self, summary):
             row = Gtk.ListBoxRow()
@@ -5680,6 +5973,7 @@ def build_native_classes(g):
             for window in list(self.get_windows() or []):
                 if isinstance(window, NativeTerminalWindow):
                     window.flush_all_sessions()
+            save_completion_corpus(force=True)
             if self._socket_server is not None:
                 self._socket_server.close()
                 self._socket_server = None
