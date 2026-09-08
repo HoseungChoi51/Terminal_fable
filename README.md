@@ -104,6 +104,7 @@ Ctrl+?            ask mode — chat at the prompt (copilot)
 Ctrl+Shift+M      expand copilot model chain in the status bar
 Ctrl+Shift+S      session history (copilot)
 Alt+Shift+A       pause/resume copilot (active pane)
+Alt+Shift+G       move pane into another tab/window
 F5                reload viewer
 F / 1             image fit / actual size
 Esc               viewer → input back to terminal
@@ -112,6 +113,12 @@ Ctrl+Shift+H, F1  shortcut guide
 
 The full table is in `docs/native-terminal-mvp.md` and in the in-app
 shortcut guide.
+
+To turn two tabs into split panes, activate the pane you want to move, press
+`Alt+Shift+G` (or choose **Move Pane to Tab or Window…**), select the other
+tab, then choose **Right** or **Below**. If that was the source tab's last
+pane, the empty tab closes automatically; the running process and scrollback
+are preserved.
 
 ## Install a user-local launcher
 

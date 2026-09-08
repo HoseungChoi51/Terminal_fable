@@ -58,6 +58,7 @@ large enough.
 | `Alt+Shift+Enter` | Zoom pane (stronger temporary fit) |
 | `Alt+Shift+Space` | Pane control mode |
 | `Alt+Shift+C` | Cycle the active pane's background tint |
+| `Alt+Shift+G` | Move the active pane into another tab/window |
 | `Alt+Shift+Z` / `Alt+Shift+Y` | Undo / redo layout change |
 
 ### Terminal

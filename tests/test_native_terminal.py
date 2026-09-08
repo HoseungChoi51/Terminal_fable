@@ -732,6 +732,17 @@ class SourceGuardrailTests(unittest.TestCase):
                          "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET")
         self.assertIn("env[CONTROL_SOCKET_ENV] = control_socket_path", SOURCE)
 
+    def test_background_terminal_bell_becomes_desktop_notification(self):
+        self.assertIn('self.terminal.connect("bell", self._on_bell)', SOURCE)
+        handler = SOURCE.split("def _on_bell(self, terminal):", 1)[1].split(
+            "def _withdraw_bell_notification", 1)[0]
+        self.assertIn("if terminal.has_focus():", handler)
+        self.assertIn("Gio.Notification.new(", handler)
+        self.assertIn("app.send_notification(", handler)
+        self.assertIn("Gio.ThemedIcon.new(APP_ID)", handler)
+        self.assertIn('self.terminal.connect("notify::has-focus"', SOURCE)
+        self.assertIn("app.withdraw_notification(", SOURCE)
+
     def test_picker_window_is_transient(self):
         self.assertIn("set_transient_for(", SOURCE)
         self.assertIn("tui_navigation", SOURCE)
@@ -849,17 +860,22 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def _show_name_dialog(self, panes, result)", SOURCE)
 
     def test_live_pane_move_wired(self):
-        # Moving a pane between windows must reparent it alive: detach without
-        # disposing (that would kill the process), then adopt with rebound
-        # window callbacks.
+        # Moving a pane between tabs or windows must reparent it alive: detach
+        # without disposing (that would kill the process), then adopt with
+        # rebound window callbacks.
         self.assertIn("def detach_pane(self, pane_id)", SOURCE)
         self.assertIn("def adopt_pane(self, pane, orientation=HORIZONTAL)",
                       SOURCE)
+        self.assertIn("def move_active_pane_to_tab(self, target, "
+                      "orientation=HORIZONTAL)", SOURCE)
         self.assertIn("def eject_active_pane(self)", SOURCE)
-        self.assertIn("def send_active_pane_to(self, target)", SOURCE)
+        self.assertIn("def send_active_pane_to(self, target, "
+                      "orientation=HORIZONTAL)", SOURCE)
         self.assertIn("pane-eject", nt.ACTION_NAMES)
         self.assertIn("pane-send", nt.ACTION_NAMES)
         self.assertIn("<Alt><Shift>e", nt.ACCELERATORS["pane-eject"])
+        self.assertIn('"Move Pane to Tab or Window…", "win.pane-send"',
+                      SOURCE)
         # detach unparents the widget but never disposes the pane
         detach = SOURCE.split("def detach_pane(self, pane_id):", 1)[1] \
             .split("def adopt_pane", 1)[0]
@@ -869,6 +885,17 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("pane.on_exited = self.window._on_pane_exited", SOURCE)
         # the tab-click controller is tracked so a move can swap it out
         self.assertIn("pane._tab_click = click", SOURCE)
+        # In-window moves target the visible tab order and preserve the
+        # requested left-right/top-bottom orientation.
+        move = SOURCE.split("def move_active_pane_to_tab", 1)[1].split(
+            "def send_active_pane_to", 1)[0]
+        self.assertIn("source.detach_pane(pane.pane_id)", move)
+        self.assertIn("target.adopt_pane(detached, orientation)", move)
+        self.assertIn("def _tabs_in_notebook_order(self)", SOURCE)
+        picker = SOURCE.split("def show_send_pane_picker", 1)[1].split(
+            "# -- naming", 1)[0]
+        self.assertIn('Gtk.Button(label="Right")', picker)
+        self.assertIn('Gtk.Button(label="Below")', picker)
 
     def test_workspace_job_restore_wired(self):
         # Detected jobs restore as one bounded split-pane window (packing),

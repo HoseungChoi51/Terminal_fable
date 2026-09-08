@@ -1888,10 +1888,15 @@ def build_native_classes(g):
             self._ghost_suffix = ""
             self._ghost_dismissed = False
             self._correction_popover = None
+            self._bell_notification_id = (
+                f"terminal-bell-{os.getpid()}-{self.pane_id}")
             self.terminal = Vte.Terminal()
             self._configure(settings)
             self._install_link_activation()
             self.terminal.connect("child-exited", self._on_child_exited)
+            self.terminal.connect("bell", self._on_bell)
+            self.terminal.connect("notify::has-focus",
+                                  self._on_terminal_focus_changed)
             try:
                 self.terminal.connect("window-title-changed",
                                       self._on_title_signal)
@@ -1977,6 +1982,53 @@ def build_native_classes(g):
             click.connect("released", self._on_link_released)
             click.connect("cancel", self._on_link_cancel)
             self.terminal.add_controller(click)
+
+        # -- desktop attention notifications ------------------------------
+
+        def _notification_application(self):
+            """Return the registered application that owns this terminal."""
+            app = Gio.Application.get_default()
+            if app is None or not app.get_is_registered():
+                return None
+            return app
+
+        def _on_bell(self, terminal):
+            """Translate a background terminal BEL into a desktop banner."""
+            # Foreground bells retain VTE's normal audible handling.  Codex's
+            # default notification policy emits BEL only while unfocused, and
+            # this guard also keeps ordinary foreground shell bells quiet.
+            if terminal.has_focus():
+                return
+            app = self._notification_application()
+            if app is None:
+                return
+            notification = Gio.Notification.new(self.title or "Terminal")
+            notification.set_body(
+                "A background terminal requested your attention.")
+            notification.set_icon(Gio.ThemedIcon.new(APP_ID))
+            notification.set_priority(Gio.NotificationPriority.NORMAL)
+            try:
+                # A stable per-pane ID replaces bursts instead of filling the
+                # notification centre with duplicate bells.
+                app.send_notification(self._bell_notification_id,
+                                      notification)
+            except Exception:
+                # A missing desktop notification service must never disturb
+                # terminal I/O.
+                pass
+
+        def _withdraw_bell_notification(self):
+            app = self._notification_application()
+            if app is None:
+                return
+            try:
+                app.withdraw_notification(self._bell_notification_id)
+            except Exception:
+                pass
+
+        def _on_terminal_focus_changed(self, terminal, _property):
+            if terminal.has_focus():
+                self._withdraw_bell_notification()
 
         def _on_link_pressed(self, gesture, n_press, x, y):
             # Ctrl+click opens the URL under the pointer. We act on "pressed"
@@ -2546,6 +2598,9 @@ def build_native_classes(g):
 
         def zoom_reset(self):
             self.terminal.set_font_scale(1.0)
+
+        def dispose(self):
+            self._withdraw_bell_notification()
 
     class MarkdownPane(ShortcutHintMixin, PaneBase):
         """Passive native Markdown viewer rendered with GTK labels."""
@@ -3528,7 +3583,7 @@ def build_native_classes(g):
             view.append("Rename Window…", "win.window-rename")
             view.append("Name Workspace (AI)…", "win.workspace-name")
             view.append("Eject Pane to New Window", "win.pane-eject")
-            view.append("Send Pane to Window…", "win.pane-send")
+            view.append("Move Pane to Tab or Window…", "win.pane-send")
             view.append("Detach Pane (keep running)", "win.pane-detach")
             view.append("Copilot Model", "win.copilot-model")
             view.append("Toggle Context Mode", "win.copilot-digest-mode")
@@ -3899,6 +3954,13 @@ def build_native_classes(g):
                 if tab.widget is child:
                     return tab
             return None
+
+        def _tabs_in_notebook_order(self):
+            """Return tabs in their visible order, including user reorders."""
+            by_widget = {tab.widget: tab for tab in self.tabs}
+            return [tab for index in range(self.notebook.get_n_pages())
+                    if (tab := by_widget.get(
+                        self.notebook.get_nth_page(index))) is not None]
 
         def _active_terminal_cwd(self):
             """cwd of the focused terminal, for a new tab to inherit."""
@@ -5689,7 +5751,7 @@ def build_native_classes(g):
                 " — Keep or Revert?",
                 on_revert=lambda: [w.close() for w in created])
 
-        # -- moving panes between windows, live (copilot Phase C) ------------
+        # -- moving panes between tabs/windows, live (copilot Phase C) -------
 
         def _adopt_pane_new_tab(self, pane, drop_default=False):
             """Install a pane (detached from elsewhere) as a new tab here. With
@@ -5721,7 +5783,29 @@ def build_native_classes(g):
             target._adopt_pane_new_tab(detached, drop_default=True)
             target.present()
 
-        def send_active_pane_to(self, target):
+        def move_active_pane_to_tab(self, target, orientation=HORIZONTAL):
+            """Move the live active pane into another tab as a split.
+
+            When the pane was alone, ``detach_pane`` removes its empty source
+            tab.  Multi-pane source tabs stay open with their remaining panes.
+            """
+            source = self.active_tab()
+            if (source is None or target is None or source is target
+                    or target not in self.tabs):
+                return False
+            pane = source.active_pane()
+            if pane is None:
+                return False
+            detached = source.detach_pane(pane.pane_id)
+            if detached is None:
+                return False
+            page = self.notebook.page_num(target.widget)
+            if page >= 0:
+                self.notebook.set_current_page(page)
+            target.adopt_pane(detached, orientation)
+            return True
+
+        def send_active_pane_to(self, target, orientation=HORIZONTAL):
             """Move the active pane into another window as a split, alive."""
             tab = self.active_tab()
             if tab is None or target is None or target is self:
@@ -5736,43 +5820,107 @@ def build_native_classes(g):
             if target_tab is None:
                 target._adopt_pane_new_tab(detached)
             else:
-                target_tab.adopt_pane(detached)
+                target_tab.adopt_pane(detached, orientation)
             target.present()
 
         def show_send_pane_picker(self):
-            """Pick which open window to send the active pane to (or a new
-            one)."""
+            """Move the active pane into another tab/window, or a new window."""
+            source = self.active_tab()
+            other_tabs = [tab for tab in self._tabs_in_notebook_order()
+                          if tab is not source]
             others = [w for w in (self._app.get_windows() or [])
                       if isinstance(w, NativeTerminalWindow) and w is not self]
             dialog = Gtk.Window()
             dialog.set_transient_for(self)
             dialog.set_modal(True)
-            dialog.set_title("Send Pane To")
-            dialog.set_default_size(360, 260)
+            dialog.set_title("Move Pane To")
+            dialog.set_default_size(520, 360)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             for margin in ("top", "bottom", "start", "end"):
                 getattr(box, f"set_margin_{margin}")(12)
 
-            def choose(target):
-                dialog.close()
-                if target is None:
-                    self.eject_active_pane()
-                else:
-                    self.send_active_pane_to(target)
+            intro = Gtk.Label(label=(
+                "Place the current pane beside the active pane in a tab. "
+                "Its process and scrollback stay intact."))
+            intro.set_wrap(True)
+            intro.set_xalign(0.0)
+            box.append(intro)
 
+            destinations = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                                Gtk.PolicyType.AUTOMATIC)
+            scroller.set_vexpand(True)
+            scroller.set_child(destinations)
+            box.append(scroller)
+
+            def heading(text):
+                label = Gtk.Label(label=text)
+                label.set_xalign(0.0)
+                label.add_css_class("heading")
+                destinations.append(label)
+
+            def destination_row(label_text, choose):
+                row = Gtk.Box(
+                    orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                label = Gtk.Label(label=label_text)
+                label.set_xalign(0.0)
+                label.set_ellipsize(Pango.EllipsizeMode.END)
+                label.set_hexpand(True)
+                right = Gtk.Button(label="Right")
+                right.set_tooltip_text("Split left-right")
+                right.connect("clicked",
+                              lambda _b: choose(HORIZONTAL))
+                below = Gtk.Button(label="Below")
+                below.set_tooltip_text("Split top-bottom")
+                below.connect("clicked", lambda _b: choose(VERTICAL))
+                row.append(label)
+                row.append(right)
+                row.append(below)
+                destinations.append(row)
+
+            def choose_tab(target, orientation):
+                dialog.close()
+                self.move_active_pane_to_tab(target, orientation)
+
+            def choose_window(target, orientation):
+                dialog.close()
+                self.send_active_pane_to(target, orientation)
+
+            if other_tabs:
+                heading("Tabs in this window")
+                ordered = self._tabs_in_notebook_order()
+                for target in other_tabs:
+                    index = ordered.index(target) + 1
+                    count = target.pane_count()
+                    suffix = "pane" if count == 1 else "panes"
+                    destination_row(
+                        f"Tab {index}: {target.title or 'Terminal'} "
+                        f"({count} {suffix})",
+                        lambda orientation, t=target: choose_tab(
+                            t, orientation))
+
+            if others:
+                heading("Other windows")
+                for target in others:
+                    destination_row(
+                        target.get_title() or "Terminal",
+                        lambda orientation, w=target: choose_window(
+                            w, orientation))
+
+            actions = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             new_btn = Gtk.Button(label="＋ New window")
-            new_btn.connect("clicked", lambda *_: choose(None))
-            box.append(new_btn)
-            for window in others:
-                title = window.get_title() or "Terminal"
-                button = Gtk.Button(label=title)
-                button.connect("clicked",
-                               lambda _b, w=window: choose(w))
-                box.append(button)
+            new_btn.connect(
+                "clicked", lambda *_: (dialog.close(),
+                                        self.eject_active_pane()))
+            actions.append(new_btn)
             close = Gtk.Button(label="Close")
             close.connect("clicked", lambda *_: dialog.close())
-            close.set_halign(Gtk.Align.END)
-            box.append(close)
+            actions.append(close)
+            actions.set_halign(Gtk.Align.END)
+            box.append(actions)
             dialog.set_child(box)
             self._close_on_escape(dialog)
             dialog.present()
