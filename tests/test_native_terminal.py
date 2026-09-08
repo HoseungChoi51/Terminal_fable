@@ -12,6 +12,7 @@ import re
 import stat
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from agent_terminal import native_terminal as nt
@@ -980,14 +981,35 @@ class PackagingTests(unittest.TestCase):
         text = script.read_text()
         self.assertIn("set -euo pipefail", text)
         self.assertIn(".local/bin", text)
+        self.assertIn('APP_ID="dev.agent.TerminalNative"', text)
+        self.assertIn("scalable/apps", text)
+        self.assertIn(
+            'rm -f "${BIN_DIR}/agent-terminal-native" "${BIN_DIR}/sls"',
+            text)
 
     def test_desktop_entry(self):
         desktop = (REPO_ROOT / "packaging"
-                   / "agent-terminal-native.desktop").read_text()
+                   / f"{nt.APP_ID}.desktop").read_text()
         self.assertIn("Type=Application", desktop)
         self.assertIn("Name=Agent Terminal", desktop)
         self.assertIn("Exec=", desktop)
+        self.assertIn(f"Icon={nt.APP_ID}", desktop)
+        self.assertIn(f"StartupWMClass={nt.APP_ID}", desktop)
         self.assertIn("Terminal=false", desktop)
+
+    def test_desktop_filename_matches_application_id(self):
+        desktop = REPO_ROOT / "packaging" / f"{nt.APP_ID}.desktop"
+        self.assertTrue(desktop.is_file())
+        self.assertFalse((REPO_ROOT / "packaging"
+                          / "agent-terminal-native.desktop").exists())
+
+    def test_scalable_app_icon(self):
+        icon = (REPO_ROOT / "packaging" / "icons" / "hicolor"
+                / "scalable" / "apps" / f"{nt.APP_ID}.svg")
+        self.assertTrue(icon.is_file())
+        root = ET.parse(icon).getroot()
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.attrib["viewBox"], "0 0 512 512")
 
 
 class ShortcutHintDetectorTests(unittest.TestCase):

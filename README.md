@@ -119,7 +119,11 @@ shortcut guide.
 packaging/install.sh
 ```
 
-This installs `~/.local/bin/agent-terminal-native` and a desktop entry.
+This installs `~/.local/bin/agent-terminal-native`, the app's scalable icon,
+and a desktop entry whose identity matches the GTK application ID. On Ubuntu,
+that identity makes windows from separate launches share one dock icon and one
+Alt+Tab application group. Re-run the installer after updating an older copy;
+if the old launcher was pinned, unpin it and pin Agent Terminal again once.
 
 To bind it to **Ctrl+Alt+T** as the default terminal and recover when a
 broken edit breaks the shortcut, see
