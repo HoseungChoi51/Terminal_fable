@@ -1,6 +1,7 @@
 """Unit-level contracts for the copilot P0 pure core."""
 
 import base64
+import os
 import subprocess
 import tempfile
 import unittest
@@ -377,6 +378,56 @@ class SnippetGuardrailTests(unittest.TestCase):
                       '"${PROMPT_COMMAND[@]}")', self.text)
         self.assertIn('PROMPT_COMMAND="_agentterm_precmd'
                       '${PROMPT_COMMAND:+;$PROMPT_COMMAND}"', self.text)
+
+    def _source_with_prompt(self, prompt, *, cwd=None, command=None):
+        script = command or '. "$2"; printf "%s" "$PS1"'
+        result = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             'PS1=$1; cd "$3"; ' + script,
+             "agent-terminal-test", prompt, str(SNIPPET), cwd or os.getcwd()],
+            capture_output=True, text=True, check=True)
+        return result.stdout
+
+    def test_prompt_moves_standard_cwd_and_puts_git_before_mark(self):
+        prompt = self._source_with_prompt(r"\u@\h:\w\$ ")
+        self.assertNotIn(r"\w", prompt)
+        self.assertNotIn(r"\W", prompt)
+        git_segment = (
+            r"\[\e[1;36m\]${_agentterm_repo}\[\e[0m\]: "
+            r"\[\e[1;35m\]${_agentterm_branch}\[\e[0m\]\$")
+        self.assertIn(git_segment, prompt)
+        self.assertLess(prompt.index(r"${_agentterm_repo}"),
+                        prompt.index(r"${_agentterm_branch}"))
+        self.assertLess(prompt.index(r"${_agentterm_branch}"),
+                        prompt.rindex(r"\$"))
+
+        short_prompt = self._source_with_prompt(r"\W\$ ")
+        self.assertNotIn(r"\W", short_prompt)
+        self.assertIn(git_segment, short_prompt)
+
+    def test_prompt_without_privilege_sensitive_mark_is_preserved(self):
+        self.assertEqual(self._source_with_prompt("custom> "), "custom> ")
+
+    def test_git_prompt_tracks_repo_and_branch_and_hides_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "sample-repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "symbolic-ref", "HEAD",
+                 "refs/heads/topic/prompt"], check=True)
+            branch = self._source_with_prompt(
+                r"\$ ", cwd=repo,
+                command=('. "$2"; printf "%s|%s" '
+                         '"$_agentterm_repo" "$_agentterm_branch"'))
+            self.assertEqual(branch, "sample-repo|topic/prompt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = self._source_with_prompt(
+                r"\$ ", cwd=tmp,
+                command=('. "$2"; printf "%s|%s" '
+                         '"$_agentterm_repo" "$_agentterm_branch"'))
+            self.assertEqual(outside, "|")
 
     def test_emits_all_termprops(self):
         for token in ("vte.shell.preexec", "vte.shell.postexec",

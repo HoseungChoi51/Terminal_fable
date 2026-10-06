@@ -161,7 +161,9 @@ language model, both **off by default** and gated:
   `assistant.llm.send_output` (default `"digest"`; see below).
 
   A **status bar** along the window bottom always shows the attached
-  model, abbreviated (e.g. `⌁ copilot: loki`). Click it or press
+  model, abbreviated (e.g. `⌁ copilot: loki`), plus the active terminal's
+  current directory (with the home directory shortened to `~`). Click the
+  model or press
   **Ctrl+Shift+M** to open the **model picker** — it shows the full
   local-first chain and lists the models the primary endpoint advertises
   (e.g. a LiteLLM gateway fronting several backends); pick one to pin it
@@ -322,7 +324,12 @@ the snippet to your shell startup yourself:
 ```
 
 The snippet is bash-only and idempotent; sourcing it twice is
-harmless.
+harmless. It also keeps the most actionable shell context beside your input:
+for prompts using Bash's standard `\w`/`\W` cwd escape and `\$` prompt mark,
+the cwd moves to the lower status bar and the prompt shows `repo: branch`
+directly before `$` or `#`, with the repository in bright cyan and the branch
+in bright magenta (`repo: @commit` for a detached HEAD). Custom prompts
+without a `\$` mark are not rewritten.
 
 ## Configuration
 

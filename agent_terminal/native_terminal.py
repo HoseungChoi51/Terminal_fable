@@ -334,6 +334,22 @@ def default_shell() -> str:
     return os.environ.get("SHELL") or "/bin/bash"
 
 
+def abbreviate_home_path(path: str | None, home: str | None = None) -> str:
+    """Compact an absolute cwd for the status bar without losing identity."""
+    if not path:
+        return ""
+    normalized = os.path.normpath(path)
+    home = os.path.normpath(home or os.path.expanduser("~"))
+    try:
+        inside_home = os.path.commonpath((normalized, home)) == home
+    except ValueError:
+        inside_home = False
+    if not inside_home:
+        return normalized
+    relative = os.path.relpath(normalized, home)
+    return "~" if relative == "." else os.path.join("~", relative)
+
+
 def new_session_id() -> str:
     """An opaque, collision-free id for a detachable ptyd session."""
     return "s-" + os.urandom(8).hex()
@@ -1686,6 +1702,8 @@ notebook > header > tabs > tab:checked { font-weight: 600; }
 .status-bar.ask-active { background-color: alpha(#6ab0ff, 0.16); }
 .status-model { font-size: 0.8em; font-family: monospace;
                 color: alpha(currentColor, 0.7); }
+.status-path { font-size: 0.8em; font-family: monospace; font-weight: bold;
+               color: alpha(currentColor, 0.58); }
 .status-hint { font-size: 0.78em; color: alpha(currentColor, 0.45); }
 /* Workspace act-then-revert confirmation bar. */
 .workspace-confirm { padding: 6px 12px; background-color: alpha(#6ab0ff, 0.16);
@@ -1914,14 +1932,18 @@ def build_native_classes(g):
 
         def __init__(self, settings, *, command=None, working_directory=None,
                      hold_on_exit=False, control_socket_path=None,
-                     extra_env=None, on_exited=None, title=None, tint=0,
+                     extra_env=None, on_exited=None,
+                     on_directory_changed=None, title=None, tint=0,
                      assistant=None, persistence=None, session_id=None):
             super().__init__(next_pane_id(), title or "Terminal")
             self.hold_on_exit = hold_on_exit
             self.on_exited = on_exited
+            self.on_directory_changed = on_directory_changed
             self.settings = settings
             self.tint = normalize_tint(tint)
             self.assistant = assistant
+            self._last_known_directory = os.path.abspath(
+                working_directory or os.getcwd())
             # Detachable-pane config + the ptyd session this pane's shell runs
             # in (when enabled). A given/reattached id reuses an existing
             # daemon; otherwise a fresh session is created.
@@ -1949,6 +1971,11 @@ def build_native_classes(g):
             self.terminal.connect("bell", self._on_bell)
             self.terminal.connect("notify::has-focus",
                                   self._on_terminal_focus_changed)
+            try:
+                self.terminal.connect("notify::current-directory-uri",
+                                      self._on_directory_uri_changed)
+            except TypeError:
+                pass
             try:
                 self.terminal.connect("window-title-changed",
                                       self._on_title_signal)
@@ -2189,13 +2216,25 @@ def build_native_classes(g):
             self.pid = pid if error is None else None
             if error is not None:
                 self._feed_message(f"spawn failed: {error}")
+            else:
+                self._notify_directory_changed()
+
+        def _on_directory_uri_changed(self, *_args):
+            self._notify_directory_changed()
+
+        def _notify_directory_changed(self):
+            # Resolve first so the status callback observes the fresh path,
+            # including the /proc fallback when the shell emits no OSC 7.
+            self.current_directory()
+            if self.on_directory_changed is not None:
+                self.on_directory_changed(self)
 
         def current_directory(self):
             """Best-effort working directory of this terminal.
 
             Prefers the shell-reported OSC 7 location; falls back to the
-            foreground process's cwd via the controlling PTY. Returns None
-            when neither is available so callers keep their own default.
+            foreground process's cwd via the controlling PTY, then the last
+            directory this pane was known to use while the child starts.
             """
             try:
                 uri = self.terminal.get_current_directory_uri()
@@ -2207,15 +2246,17 @@ def build_native_classes(g):
                 except Exception:
                     path = None
                 if path and os.path.isdir(path):
+                    self._last_known_directory = path
                     return path
             try:
                 pgrp = os.tcgetpgrp(self.terminal.get_pty().get_fd())
                 path = os.readlink(f"/proc/{pgrp}/cwd")
                 if os.path.isdir(path):
+                    self._last_known_directory = path
                     return path
             except Exception:
                 pass
-            return None
+            return self._last_known_directory
 
         # -- command journal (copilot P0) --------------------------------
 
@@ -2255,6 +2296,7 @@ def build_native_classes(g):
             self._flush_id = None
             events, self._termprop_events = self._termprop_events, []
             if self.journal is not None and events:
+                names = [name for name, _ in events]
                 try:
                     row = self.terminal.get_cursor_position()[1]
                 except Exception:
@@ -2268,13 +2310,14 @@ def build_native_classes(g):
                     self._maybe_update_title()
                     self._maybe_show_correction()
                 if self._tracker is not None:
-                    names = [name for name, _ in events]
                     if copilot_journal.PREEXEC in names:
                         self._tracker.on_preexec()
                     if copilot_journal.PRECMD in names:
                         self._tracker.on_precmd()
                     self._ghost_dismissed = False
                     self._refresh_ghost()
+                if copilot_journal.PRECMD in names:
+                    self._notify_directory_changed()
             # Resolve a deferred title now that journal state is current
             # (see _on_title_signal): a title set while a command runs is
             # a program title and wins; one set at the prompt is shell
@@ -3218,6 +3261,7 @@ def build_native_classes(g):
             pane. Rebinds the pane's window-scoped callback so exit/close route
             to this window."""
             pane.on_exited = self.window._on_pane_exited
+            pane.on_directory_changed = self.window._on_pane_directory_changed
             self.add_pane(pane, orientation)
 
         def _on_pane_pressed(self, gesture, n_press, x, y, pane_id):
@@ -3241,6 +3285,7 @@ def build_native_classes(g):
                 self._recent_terminal_id = pane_id
             self.title = self.panes[pane_id].title
             self.window.update_tab_title(self)
+            self.window._refresh_status()
             if focus:
                 self.panes[pane_id].focus()
 
@@ -3756,19 +3801,52 @@ def build_native_classes(g):
             click.connect("pressed",
                           lambda *_: self.show_model_picker())
             self._status_model.add_controller(click)
+            self._status_path = Gtk.Label(label=self._status_path_text())
+            self._status_path.set_xalign(0.0)
+            self._status_path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            self._status_path.set_max_width_chars(60)
+            self._status_path.add_css_class("status-path")
             hint = Gtk.Label(label="Ctrl+?  ask")
             hint.add_css_class("status-hint")
+            # Keep the active working directory at the leading edge of the
+            # lower bar; the model label expands into the remaining space.
+            bar.append(self._status_path)
             bar.append(self._status_model)
             bar.append(hint)
             self._status_bar = bar
             return bar
 
+        def _status_path_text(self):
+            cwd = self._status_directory()
+            return "cwd  " + (abbreviate_home_path(cwd) or "—")
+
+        def _status_directory(self):
+            """Directory belonging to the active pane's input context."""
+            tab = self.active_tab()
+            if tab is None:
+                return None
+            pane = tab.active_pane()
+            if pane is None or pane.kind != "terminal":
+                pane = tab.panes.get(tab._recent_terminal_id)
+            getter = getattr(pane, "current_directory", None)
+            if getter is None:
+                return None
+            try:
+                return getter()
+            except Exception:
+                return None
+
         def _refresh_status(self):
-            """Repaint the status bar (model text + ask-active highlight)."""
+            """Repaint the model, cwd, and ask-active status."""
             model = getattr(self, "_status_model", None)
             if model is None:
                 return
             model.set_text("⌁ " + self._copilot_status_text())
+            path = getattr(self, "_status_path", None)
+            if path is not None:
+                cwd = self._status_directory()
+                path.set_text("cwd  " + (abbreviate_home_path(cwd) or "—"))
+                path.set_tooltip_text(cwd or "Working directory unavailable")
             active = getattr(self, "_ask_token", None) is not None
             setter = (self._status_bar.add_css_class if active
                       else self._status_bar.remove_css_class)
@@ -3927,7 +4005,9 @@ def build_native_classes(g):
                                    or self.options.working_directory),
                 hold_on_exit=hold_on_exit,
                 control_socket_path=self._app.control_socket_path,
-                on_exited=self._on_pane_exited, title=title,
+                on_exited=self._on_pane_exited,
+                on_directory_changed=self._on_pane_directory_changed,
+                title=title,
                 tint=self._next_tint_slot(),
                 extra_env=extra_env,
                 assistant=self.options.native_config.assistant,
@@ -3964,6 +4044,10 @@ def build_native_classes(g):
             if tab:
                 tab.close_pane(pane.pane_id)
 
+        def _on_pane_directory_changed(self, pane):
+            if pane is self._active_pane():
+                self._refresh_status()
+
         # -- tabs -----------------------------------------------------------
 
         def add_terminal_tab(self, command=None, working_directory=None,
@@ -3989,6 +4073,7 @@ def build_native_classes(g):
             pane = tab.active_pane()
             if pane:
                 GLib.idle_add(pane.focus)
+            self._refresh_status()
 
         def update_tab_title(self, tab):
             label = self.notebook.get_tab_label(tab.widget)
@@ -4098,6 +4183,7 @@ def build_native_classes(g):
                     pane = tab.active_pane()
                     if pane:
                         GLib.idle_add(pane.focus)
+                    self._refresh_status()
                     break
 
         # -- opening files --------------------------------------------------

@@ -39,6 +39,54 @@ case ":${HISTCONTROL:-}:" in
     *) HISTCONTROL="${HISTCONTROL:+$HISTCONTROL:}ignorespace" ;;
 esac
 
+# Keep repository context beside the command being typed, where it is useful
+# before every invocation.  The window status bar owns the cwd instead, so
+# remove Bash's standard \w/\W prompt escapes and put a compact repo/branch
+# segment immediately before \$ (which still expands to "$" for a user and
+# "#" for root).  Other/custom prompt machinery is left alone when it has no
+# \$ mark.
+#
+# Keep the names in variables referenced by PS1 rather than interpolating them
+# into PS1 itself.  Besides preserving unusual-but-valid Git names literally,
+# this lets Bash's \[...\] markers exclude the color escapes from Readline's
+# cursor-width calculation.
+_agentterm_update_prompt() {
+    local root repo branch
+    [[ -n ${_agentterm_prompt_managed:-} ]] || return 0
+    _agentterm_repo=""
+    _agentterm_branch=""
+    if root="$(command git rev-parse --show-toplevel 2>/dev/null)"; then
+        repo="${root##*/}"
+        if branch="$(command git symbolic-ref \
+                --quiet --short HEAD 2>/dev/null)"; then
+            _agentterm_repo="$repo"
+            _agentterm_branch="$branch"
+        elif branch="$(command git rev-parse --short HEAD 2>/dev/null)"; then
+            _agentterm_repo="$repo"
+            _agentterm_branch="@$branch"
+        fi
+    fi
+    if [[ -n $_agentterm_repo && -n $_agentterm_branch ]]; then
+        PS1="${_agentterm_prompt_prefix}"
+        PS1+=' \[\e[1;36m\]${_agentterm_repo}\[\e[0m\]'
+        PS1+=': \[\e[1;35m\]${_agentterm_branch}\[\e[0m\]\$'
+        PS1+="${_agentterm_prompt_suffix}"
+    else
+        PS1="${_agentterm_prompt_prefix}"'\$'"${_agentterm_prompt_suffix}"
+    fi
+    return 0
+}
+
+if [[ ${PS1:-} == *'\$'* ]]; then
+    _agentterm_prompt_base=${PS1//'\w'/}
+    _agentterm_prompt_base=${_agentterm_prompt_base//'\W'/}
+    _agentterm_prompt_prefix=${_agentterm_prompt_base%'\$'*}
+    _agentterm_prompt_suffix=${_agentterm_prompt_base##*'\$'}
+    _agentterm_prompt_managed=1
+    unset _agentterm_prompt_base
+    _agentterm_update_prompt
+fi
+
 _agentterm_precmd() {
     local errsv="$?" entry rest b64 cmd out
     entry="$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" || entry=""
@@ -71,6 +119,7 @@ _agentterm_precmd() {
         "$cmd")
     out+=$(printf '\033]666;vte.shell.precmd!\033\\')
     printf '%s' "$out"
+    _agentterm_update_prompt
     return "$errsv"
 }
 

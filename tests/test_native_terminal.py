@@ -153,6 +153,17 @@ class OptionTests(unittest.TestCase):
         path = nt.default_control_socket_path(1234)
         self.assertIn("agent-terminal-native-1234.sock", path)
 
+    def test_status_path_abbreviates_only_the_home_tree(self):
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice", "/home/alice"), "~")
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice/work/repo", "/home/alice"),
+            "~/work/repo")
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice-archive", "/home/alice"),
+            "/home/alice-archive")
+        self.assertEqual(nt.abbreviate_home_path(None, "/home/alice"), "")
+
 
 def grid_2x2():
     """h-split of (a, v-split of (b, c)) plus d on the right."""
@@ -884,6 +895,8 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertNotIn("pane.dispose()", detach)
         # adopt rebinds the window-scoped exit callback to the new window
         self.assertIn("pane.on_exited = self.window._on_pane_exited", SOURCE)
+        self.assertIn("pane.on_directory_changed = "
+                      "self.window._on_pane_directory_changed", SOURCE)
         # the tab-click controller is tracked so a move can swap it out
         self.assertIn("pane._tab_click = click", SOURCE)
         # In-window moves target the visible tab order and preserve the
@@ -965,6 +978,18 @@ class SourceGuardrailTests(unittest.TestCase):
         # the ask bar surfaces the inferred task so a bad segmentation shows
         self.assertIn("episode_now = self._current_episode()", SOURCE)
         self.assertIn('"ask-task"', SOURCE)
+
+    def test_active_pane_cwd_is_wired_into_the_lower_status_bar(self):
+        self.assertIn('self._status_path = Gtk.Label(', SOURCE)
+        self.assertIn('font-weight: bold', nt.APP_CSS)
+        self.assertIn('bar.append(self._status_path)', SOURCE)
+        self.assertIn('def _status_directory(self):', SOURCE)
+        self.assertIn('notify::current-directory-uri', SOURCE)
+        self.assertIn('on_directory_changed=self._on_pane_directory_changed',
+                      SOURCE)
+        self.assertIn('if copilot_journal.PRECMD in names:\n'
+                      '                    self._notify_directory_changed()',
+                      SOURCE)
 
 
 class BuildInfoTests(unittest.TestCase):
