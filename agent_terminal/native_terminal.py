@@ -1243,6 +1243,30 @@ def is_safe_external_uri(uri) -> bool:
     return scheme in SAFE_URI_SCHEMES
 
 
+def trim_url_punctuation(uri: str | None) -> str | None:
+    """Remove likely prose suffixes from an automatically matched URL.
+
+    Balanced brackets/parentheses may belong to the URL (IPv6 hosts, query
+    parameters, Wikipedia titles). Only discard excess closing delimiters.
+    This is a plain-text heuristic; explicit OSC 8 targets must bypass it.
+    """
+    if not uri:
+        return uri
+    excess = {close: uri.count(close) - uri.count(opening)
+              for opening, close in (("(", ")"), ("[", "]"))}
+    end = len(uri)
+    while end:
+        char = uri[end - 1]
+        if char in ".,;:!?'":
+            end -= 1
+        elif excess.get(char, 0) > 0:
+            excess[char] -= 1
+            end -= 1
+        else:
+            break
+    return uri[:end]
+
+
 def _debug_link(message):
     """Emit link-click diagnostics to stderr when AGENT_TERMINAL_DEBUG is set."""
     if os.environ.get("AGENT_TERMINAL_DEBUG"):
@@ -1999,7 +2023,7 @@ def build_native_classes(g):
                 pass
 
         def _install_link_activation(self):
-            """Open a URL under the pointer on a plain left click."""
+            """Open a URL under the pointer on Ctrl+left click."""
             click = Gtk.GestureClick()
             click.set_button(0)  # observe every button; filter in the handler
             # Run ahead of VTE's own button handling (the pane-focus gesture
@@ -2112,7 +2136,7 @@ def build_native_classes(g):
                 _debug_link(f"check_hyperlink_at raised: {exc!r}")
             try:
                 match, _tag = self.terminal.check_match_at(x, y)
-                return match
+                return trim_url_punctuation(match)
             except Exception as exc:
                 _debug_link(f"check_match_at raised: {exc!r}")
                 return None

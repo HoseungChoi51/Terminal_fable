@@ -73,6 +73,14 @@ large enough.
 | `Ctrl+Shift+R` | Reset terminal |
 | `Ctrl+Shift+K` | Clear scrollback |
 | `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Font zoom in / out / reset (active pane only) |
+| `Ctrl+left click` | Open the link under the pointer |
+
+For URLs detected in plain text, opening a link drops trailing prose
+punctuation such as a period or an unmatched closing parenthesis. Balanced
+parentheses and square brackets within the URL are preserved. Explicit
+hyperlinks supplied by applications (OSC 8) use their exact target, including
+any trailing punctuation. For a plain-text URL that intentionally ends in
+sentence punctuation, percent-encode that final character to avoid ambiguity.
 
 ### Viewers
 
