@@ -98,6 +98,7 @@ Alt+Shift+Arrows  focus panes
 Alt+Shift+F       temporary focus fit
 Alt+Shift+Space   pane control mode
 Ctrl+Shift+C/V    copy / paste
+Ctrl+Alt+C        copy selection as one line (unwrap app-wrapped commands)
 Ctrl+Shift+F      find
 Ctrl+Shift+Space  command menu (copilot)
 Ctrl+?            ask mode — chat at the prompt (copilot)

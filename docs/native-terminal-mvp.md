@@ -66,6 +66,7 @@ large enough.
 | Shortcut | Action |
 | -------- | ------ |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `Ctrl+Alt+C` | Copy as one line — joins rows an app hard-wrapped (e.g. a long command shown by a TUI), drops indents and `\` continuations |
 | `Ctrl+Shift+A` | Select all |
 | `Ctrl+Shift+F` | Find (searches VTE scrollback) |
 | `Ctrl+Shift+G` / `Ctrl+Shift+B` | Find next / previous |

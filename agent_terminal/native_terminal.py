@@ -1290,8 +1290,8 @@ ACTION_NAMES = (
     "grow-left", "grow-right", "grow-up", "grow-down",
     "increase-width", "decrease-width", "increase-height", "decrease-height",
     "undo-layout", "redo-layout",
-    "copy", "paste", "select-all", "find", "find-next", "find-previous",
-    "reset", "reload-pane", "clear-scrollback",
+    "copy", "copy-one-line", "paste", "select-all", "find", "find-next",
+    "find-previous", "reset", "reload-pane", "clear-scrollback",
     "zoom-in", "zoom-out", "zoom-reset",
     "copilot-menu", "copilot-ask", "copilot-model", "copilot-digest-mode",
     "copilot-pause", "copilot-summary", "copilot-debug", "copilot-sessions",
@@ -1324,6 +1324,7 @@ ACCELERATORS = {
     "undo-layout": ("<Alt><Shift>z",),
     "redo-layout": ("<Alt><Shift>y",),
     "copy": ("<Ctrl><Shift>c",),
+    "copy-one-line": ("<Ctrl><Alt>c",),
     "paste": ("<Ctrl><Shift>v",),
     "select-all": ("<Ctrl><Shift>a",),
     "find": ("<Ctrl><Shift>f",),
@@ -1358,6 +1359,33 @@ RESERVED_PLAIN_ACCELERATORS = (
     "<Ctrl>h", "<Ctrl>c", "<Ctrl>d", "<Ctrl>w", "<Ctrl>a", "<Ctrl>e",
     "<Ctrl>k", "<Ctrl>l", "<Ctrl>r", "<Ctrl>t", "<Ctrl>u",
 )
+
+
+def join_wrapped_lines(text: str, columns: int = 0) -> str:
+    """Collapse a multi-row selection into one line for "Copy as One Line".
+
+    VTE already joins rows it autowrapped itself; what survives as a
+    newline is a break the *application* wrote (TUIs like Claude Code
+    re-wrap their output to the window width and indent the continuation).
+    Rows are stripped and joined with a single space; blank rows vanish and
+    a trailing shell continuation backslash is dropped. A row exactly
+    ``columns`` wide was cut at the margin, likely mid-word, so it joins
+    the next row with no space.
+    """
+    parts = []
+    glue_next = True
+    for raw in text.splitlines():
+        row = raw.strip()
+        if not row:
+            continue
+        if row.endswith("\\") and not row.endswith("\\\\"):
+            row = row[:-1].rstrip()
+        if parts and not glue_next:
+            parts[-1] += row
+        else:
+            parts.append(row)
+        glue_next = not (columns > 0 and len(raw.rstrip()) >= columns)
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -2552,6 +2580,15 @@ def build_native_classes(g):
         def copy(self):
             self.terminal.copy_clipboard_format(Vte.Format.TEXT)
 
+        def copy_one_line(self):
+            try:
+                text = self.terminal.get_text_selected(Vte.Format.TEXT)
+            except Exception:
+                text = None
+            if text:
+                copy_text_to_clipboard(join_wrapped_lines(
+                    text, self.terminal.get_column_count()))
+
         def paste(self):
             self.terminal.paste_clipboard()
 
@@ -3568,6 +3605,7 @@ def build_native_classes(g):
             menu.append_section(None, files)
             edit = Gio.Menu()
             edit.append("Copy", "win.copy")
+            edit.append("Copy as One Line", "win.copy-one-line")
             edit.append("Paste", "win.paste")
             edit.append("Select All", "win.select-all")
             edit.append("Find", "win.find")
@@ -4364,6 +4402,8 @@ def build_native_classes(g):
                 tab.redo()
             elif name in ("copy", "paste", "reset"):
                 self._route(name)
+            elif name == "copy-one-line":
+                self._route("copy_one_line")
             elif name == "select-all":
                 self._route("select_all")
             elif name == "find":

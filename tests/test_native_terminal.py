@@ -588,8 +588,8 @@ class ActionTests(unittest.TestCase):
         "increase-width", "decrease-width", "increase-height",
         "decrease-height",
         "undo-layout", "redo-layout",
-        "copy", "paste", "select-all", "find", "find-next", "find-previous",
-        "reset", "reload-pane", "clear-scrollback",
+        "copy", "copy-one-line", "paste", "select-all", "find", "find-next",
+        "find-previous", "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
         "copilot-menu", "copilot-ask", "copilot-pause", "copilot-sessions",
         "copilot-debug",
@@ -615,6 +615,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("<Alt><Shift>f", nt.ACCELERATORS["fit-focused"])
         self.assertIn("<Alt><Shift>space", nt.ACCELERATORS["pane-leader"])
         self.assertIn("<Ctrl><Shift>c", nt.ACCELERATORS["copy"])
+        self.assertIn("<Ctrl><Alt>c", nt.ACCELERATORS["copy-one-line"])
         self.assertIn("<Ctrl><Shift>v", nt.ACCELERATORS["paste"])
         self.assertIn("<Ctrl><Shift>f", nt.ACCELERATORS["find"])
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
@@ -1128,6 +1129,33 @@ class PersistenceConfigTests(unittest.TestCase):
         re = nt.ptyd_attach_argv("s-abc", ["/bin/bash"], "/tmp", 4096,
                                  create=False)
         self.assertNotIn("--create", re)
+
+
+class JoinWrappedLinesTests(unittest.TestCase):
+    def test_app_wrapped_command_joins_with_spaces(self):
+        text = "  git log --oneline\n    --graph --all\n    | head -20\n"
+        self.assertEqual(nt.join_wrapped_lines(text),
+                         "git log --oneline --graph --all | head -20")
+
+    def test_drops_continuation_backslash_and_blank_rows(self):
+        text = "docker run \\\n\n  -it ubuntu \\\n  bash"
+        self.assertEqual(nt.join_wrapped_lines(text),
+                         "docker run -it ubuntu bash")
+
+    def test_keeps_escaped_backslash(self):
+        self.assertEqual(nt.join_wrapped_lines("echo a\\\\\nb"),
+                         "echo a\\\\ b")
+
+    def test_full_width_row_joins_without_space(self):
+        text = "curl https://exam\nple.com/path"
+        self.assertEqual(nt.join_wrapped_lines(text, columns=17),
+                         "curl https://example.com/path")
+        self.assertEqual(nt.join_wrapped_lines(text, columns=80),
+                         "curl https://exam ple.com/path")
+
+    def test_single_line_unchanged(self):
+        self.assertEqual(nt.join_wrapped_lines("ls -la"), "ls -la")
+        self.assertEqual(nt.join_wrapped_lines(""), "")
 
 
 if __name__ == "__main__":
