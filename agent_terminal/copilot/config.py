@@ -121,6 +121,20 @@ class ResumeConfig:
 
 
 @dataclass(frozen=True)
+class SshConfig:
+    """Connection liveness for OpenSSH started in an integrated Bash pane.
+
+    The values become command-line options only inside Terminal Fable's
+    default interactive Bash shell; they never edit the user's SSH config or
+    affect another terminal.  A zero interval/count disables the wrapper.
+    """
+    keepalive: bool = True
+    server_alive_interval_s: int = 15
+    server_alive_count_max: int = 3
+    disconnect_notice: bool = True
+
+
+@dataclass(frozen=True)
 class WorkspaceConfig:
     """Grouping sessions into jobs and laying them out as split panes."""
     # Legibility floor: a restored pane is never sub-divided below this.
@@ -147,6 +161,7 @@ class AssistantConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     ask: AskConfig = field(default_factory=AskConfig)
     resume: ResumeConfig = field(default_factory=ResumeConfig)
+    ssh: SshConfig = field(default_factory=SshConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
 
 
@@ -221,6 +236,7 @@ _SECTIONS = {
     "llm": LlmConfig,
     "ask": AskConfig,
     "resume": ResumeConfig,
+    "ssh": SshConfig,
     "workspace": WorkspaceConfig,
 }
 

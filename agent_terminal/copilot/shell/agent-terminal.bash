@@ -87,6 +87,28 @@ if [[ ${PS1:-} == *'\$'* ]]; then
     _agentterm_update_prompt
 fi
 
+# OpenSSH's default TCP timeout can leave a dead peer looking alive for a very
+# long time.  Terminal Fable passes these values only to its default
+# interactive Bash panes; wrap the client here so aliases/functions such as
+# `connect-x670` that ultimately invoke `ssh` inherit the liveness probe.
+#
+# Preserve a user-defined `ssh` function: it may intentionally add a jump
+# host, a hardware token, or its own transport policy.  A user can disable
+# this scoped wrapper through assistant.ssh.keepalive or either zero value.
+case "${AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL:-}:${AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX:-}" in
+    *[!0-9:]*|:*|*:|0:*|*:0) ;;
+    *)
+        if ! declare -F ssh >/dev/null 2>&1; then
+            ssh() {
+                command ssh \
+                    -o "ServerAliveInterval=${AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL}" \
+                    -o "ServerAliveCountMax=${AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX}" \
+                    "$@"
+            }
+        fi
+        ;;
+esac
+
 _agentterm_precmd() {
     local errsv="$?" entry rest b64 cmd out
     entry="$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" || entry=""

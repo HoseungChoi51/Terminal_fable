@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from agent_terminal import native_terminal as nt
+from agent_terminal.copilot import config as assistant_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (REPO_ROOT / "agent_terminal" / "native_terminal.py").read_text(
@@ -163,6 +164,19 @@ class OptionTests(unittest.TestCase):
             nt.abbreviate_home_path("/home/alice-archive", "/home/alice"),
             "/home/alice-archive")
         self.assertEqual(nt.abbreviate_home_path(None, "/home/alice"), "")
+
+    def test_ssh_keepalive_env_is_scoped_and_validated(self):
+        cfg = assistant_config.parse_assistant_config({})
+        self.assertEqual(nt.ssh_keepalive_env(cfg), {
+            nt.SSH_SERVER_ALIVE_INTERVAL_ENV: "15",
+            nt.SSH_SERVER_ALIVE_COUNT_MAX_ENV: "3",
+        })
+        disabled = assistant_config.parse_assistant_config(
+            {"ssh": {"keepalive": False}})
+        self.assertEqual(nt.ssh_keepalive_env(disabled), {})
+        zero = assistant_config.parse_assistant_config(
+            {"ssh": {"server_alive_interval_s": 0}})
+        self.assertEqual(nt.ssh_keepalive_env(zero), {})
 
 
 def grid_2x2():
@@ -978,6 +992,19 @@ class SourceGuardrailTests(unittest.TestCase):
         # the ask bar surfaces the inferred task so a bad segmentation shows
         self.assertIn("episode_now = self._current_episode()", SOURCE)
         self.assertIn('"ask-task"', SOURCE)
+
+    def test_ssh_disconnect_recovery_is_wired_without_auto_run(self):
+        self.assertIn("from agent_terminal.copilot import ssh as copilot_ssh",
+                      SOURCE)
+        self.assertIn("def ssh_keepalive_env(assistant)", SOURCE)
+        self.assertIn("def _maybe_show_ssh_disconnect(self)", SOURCE)
+        self.assertIn("copilot_ssh.is_disconnect(record)", SOURCE)
+        self.assertIn('Gtk.Button(label="Reconnect")', SOURCE)
+        self.assertIn('Gtk.Button(label="Close Pane")', SOURCE)
+        recovery = SOURCE.split("def _show_ssh_disconnect_chip", 1)[1].split(
+            "# -- ghost text", 1)[0]
+        self.assertIn("self.insert_text(command)", recovery)
+        self.assertNotIn('insert_text("\\r")', recovery)
 
     def test_active_pane_cwd_is_wired_into_the_lower_status_bar(self):
         self.assertIn('self._status_path = Gtk.Label(', SOURCE)

@@ -24,6 +24,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.journal.max_commands, 200)
         self.assertFalse(cfg.suggestions.ghost_text)
         self.assertFalse(cfg.llm.allow_remote_context)
+        self.assertTrue(cfg.ssh.keepalive)
+        self.assertEqual(cfg.ssh.server_alive_interval_s, 15)
+        self.assertEqual(cfg.ssh.server_alive_count_max, 3)
 
     def test_valid_payload(self):
         cfg = cconfig.parse_assistant_config({
@@ -87,6 +90,18 @@ class ConfigTests(unittest.TestCase):
                                "job_gap_minutes": 10}}).workspace
         self.assertEqual(ws2.max_panes_per_window, 4)
         self.assertEqual(ws2.job_gap_minutes, 10)
+
+    def test_ssh_config_defaults_and_parse(self):
+        cfg = cconfig.parse_assistant_config({
+            "ssh": {"keepalive": False,
+                    "server_alive_interval_s": 30,
+                    "server_alive_count_max": 5,
+                    "disconnect_notice": False},
+        }).ssh
+        self.assertFalse(cfg.keepalive)
+        self.assertEqual(cfg.server_alive_interval_s, 30)
+        self.assertEqual(cfg.server_alive_count_max, 5)
+        self.assertFalse(cfg.disconnect_notice)
 
 
 class RedactTests(unittest.TestCase):
@@ -433,6 +448,29 @@ class SnippetGuardrailTests(unittest.TestCase):
         for token in ("vte.shell.preexec", "vte.shell.postexec",
                       "vte.shell.precmd", "vte.ext.agentterm.cmd"):
             self.assertIn(token, self.text)
+
+    def test_ssh_keepalive_wrapper_is_scoped_and_preserves_user_function(self):
+        self.assertIn("AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL", self.text)
+        self.assertIn("AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX", self.text)
+        self.assertIn("ServerAliveInterval=", self.text)
+        self.assertIn("ServerAliveCountMax=", self.text)
+        self.assertIn("declare -F ssh", self.text)
+
+        env = dict(os.environ, AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL="15",
+                   AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX="3")
+        wrapped = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f". '{SNIPPET}'; declare -f ssh"],
+            env=env, capture_output=True, text=True, check=True).stdout
+        self.assertIn("ServerAliveInterval=", wrapped)
+        self.assertIn("ServerAliveCountMax=", wrapped)
+
+        preserved = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f"ssh() {{ echo user-wrapper; }}; . '{SNIPPET}'; declare -f ssh"],
+            env=env, capture_output=True, text=True, check=True).stdout
+        self.assertIn("echo user-wrapper", preserved)
+        self.assertNotIn("ServerAliveInterval=", preserved)
 
     def test_seed_block_placement(self):
         # Episode history seed: recall the episode, relocate HISTFILE off the

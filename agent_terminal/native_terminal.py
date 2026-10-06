@@ -48,6 +48,7 @@ from agent_terminal.copilot import episode as copilot_episode
 from agent_terminal.copilot import askcontext as copilot_askcontext
 from agent_terminal.copilot import resume as copilot_resume
 from agent_terminal.copilot import jobs as copilot_jobs
+from agent_terminal.copilot import ssh as copilot_ssh
 from agent_terminal import ptyd
 # Re-exported from the shared TUI core so the standalone subprocesses depend
 # only on tui_core; kept importable from here for internal use + back-compat.
@@ -59,6 +60,8 @@ VERSION = "0.1.0"
 APP_ID = "dev.agent.TerminalNative"
 APP_TITLE = "Agent Terminal"
 CONFIG_PATH = "~/.config/agent-terminal/native.json"
+SSH_SERVER_ALIVE_INTERVAL_ENV = "AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL"
+SSH_SERVER_ALIVE_COUNT_MAX_ENV = "AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX"
 
 
 @dataclass(frozen=True)
@@ -348,6 +351,30 @@ def abbreviate_home_path(path: str | None, home: str | None = None) -> str:
         return normalized
     relative = os.path.relpath(normalized, home)
     return "~" if relative == "." else os.path.join("~", relative)
+
+
+def ssh_keepalive_env(assistant) -> dict[str, str]:
+    """Environment that enables scoped OpenSSH liveness in the rcfile.
+
+    The shipped Bash snippet consumes these only for the terminal's default
+    interactive Bash shell.  Keeping this as data rather than editing
+    ``~/.ssh/config`` confines the policy to this app and makes config changes
+    apply to new panes only.
+    """
+    config = getattr(assistant, "ssh", None)
+    if config is None or not getattr(config, "keepalive", False):
+        return {}
+    try:
+        interval = int(config.server_alive_interval_s)
+        count = int(config.server_alive_count_max)
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    if interval <= 0 or count <= 0:
+        return {}
+    return {
+        SSH_SERVER_ALIVE_INTERVAL_ENV: str(interval),
+        SSH_SERVER_ALIVE_COUNT_MAX_ENV: str(count),
+    }
 
 
 def new_session_id() -> str:
@@ -1962,6 +1989,8 @@ def build_native_classes(g):
             self._ghost_suffix = ""
             self._ghost_dismissed = False
             self._correction_popover = None
+            self._ssh_disconnect_popover = None
+            self._ssh_disconnect_record_seq = None
             self._bell_notification_id = (
                 f"terminal-bell-{os.getpid()}-{self.pane_id}")
             self.terminal = Vte.Terminal()
@@ -2177,6 +2206,8 @@ def build_native_classes(g):
                 env[CONTROL_SOCKET_ENV] = control_socket_path
             if extra_env:
                 env.update(extra_env)
+            if command is None:
+                env.update(ssh_keepalive_env(self.assistant))
             # Shell-integration rcfile injection; fails open to the
             # original argv (see copilot/shellintegration.py).
             argv = copilot_shell.wrap_argv(
@@ -2308,6 +2339,7 @@ def build_native_classes(g):
                     cursor_row=row, read_rows=self._read_rows)
                 if len(self.journal.records) != before:
                     self._maybe_update_title()
+                    self._maybe_show_ssh_disconnect()
                     self._maybe_show_correction()
                 if self._tracker is not None:
                     if copilot_journal.PREEXEC in names:
@@ -2412,6 +2444,71 @@ def build_native_classes(g):
             insert.connect("clicked", on_insert)
             popover.popup()
             GLib.timeout_add_seconds(8, dismiss)
+
+        # -- SSH liveness + reconnect notice ------------------------------
+
+        def _maybe_show_ssh_disconnect(self):
+            ssh_config = getattr(self.assistant, "ssh", None)
+            if ssh_config is None or not ssh_config.disconnect_notice:
+                return
+            record = self.journal.last_record()
+            if (record is None
+                    or record.seq == self._ssh_disconnect_record_seq
+                    or not record.cmd
+                    or not copilot_ssh.is_disconnect(record)):
+                return
+            self._ssh_disconnect_record_seq = record.seq
+            self._show_ssh_disconnect_chip(record.cmd)
+
+        def _show_ssh_disconnect_chip(self, command):
+            """Offer recovery only after OpenSSH has conclusively returned.
+
+            The command is reinserted without a newline; reconnecting is
+            therefore always a deliberate Enter press.  Closing takes the
+            same pane-close path as Ctrl+Shift+W.
+            """
+            if self._ssh_disconnect_popover is not None:
+                self._ssh_disconnect_popover.popdown()
+            popover = Gtk.Popover()
+            self._ssh_disconnect_popover = popover
+            popover.set_parent(self.terminal)
+            popover.set_autohide(False)
+            popover.set_position(Gtk.PositionType.TOP)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            box.add_css_class("copilot-flash")
+            box.append(Gtk.Label(label="SSH disconnected"))
+            reconnect = Gtk.Button(label="Reconnect")
+            reconnect.add_css_class("chip-button")
+            close = Gtk.Button(label="Close Pane")
+            close.add_css_class("chip-button")
+            dismiss_button = Gtk.Button(label="Dismiss")
+            dismiss_button.add_css_class("flat")
+            box.append(reconnect)
+            box.append(close)
+            box.append(dismiss_button)
+            popover.set_child(box)
+
+            def dismiss():
+                if self._ssh_disconnect_popover is popover:
+                    self._ssh_disconnect_popover = None
+                popover.popdown()
+                popover.unparent()
+                return GLib.SOURCE_REMOVE
+
+            def on_reconnect(_button):
+                self.insert_text(command)
+                self.terminal.grab_focus()
+                dismiss()
+
+            def on_close(_button):
+                dismiss()
+                if self.on_exited is not None:
+                    self.on_exited(self)
+
+            reconnect.connect("clicked", on_reconnect)
+            close.connect("clicked", on_close)
+            dismiss_button.connect("clicked", lambda _button: dismiss())
+            popover.popup()
 
         # -- ghost text (copilot P4) -------------------------------------
 

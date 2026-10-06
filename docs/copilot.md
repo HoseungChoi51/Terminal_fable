@@ -292,6 +292,28 @@ non-bash shells, when disabled in config, and when
 terminal still tracks the working directory (OSC 7), so directory-based
 features keep working.
 
+### SSH connection liveness
+
+In Terminal Fable's default interactive Bash panes, OpenSSH gets an
+application-level keepalive by default: every 15 seconds it probes the remote
+server and gives up after three missed replies (about 45 seconds). This keeps a
+server shutdown or network black hole from leaving the `ssh` client hung
+indefinitely. The settings are scoped to this terminal only: Terminal Fable
+does not edit `~/.ssh/config` or affect other terminal apps.
+
+This works for `ssh` itself and for aliases/functions such as `connect-x670`
+that invoke `ssh`. A user-defined `ssh` *function* is preserved rather than
+wrapped, as it may own special transport behavior. Explicit `--command`
+launches, non-Bash shells, and standalone scripts are likewise untouched.
+
+After OpenSSH returns a non-zero status with a recognized disconnect message,
+the pane shows an **SSH disconnected** notice. **Reconnect** places the exact
+recorded command back on the local prompt—without running it—while **Close
+Pane** follows the usual `Ctrl+Shift+W` close path. The app never treats a
+quiet remote command as dead, never auto-reconnects, and never closes a pane
+on its own. If you need to end a currently stuck OpenSSH client immediately,
+press Enter and then type `~.` (the standard local OpenSSH escape).
+
 **A note on a possible brief flash.** The integration works by having
 the shell emit small marker escape sequences (OSC 666 termprops) each
 time you run a command. VTE 0.84 occasionally *paints* one of these
@@ -355,7 +377,9 @@ missing or invalid values fall back to the defaults shown here:
     "ask": {"enabled": true, "auto_pilot": false,
             "auto_pilot_max_risk": "local-change", "carry_draft": true,
             "max_turns": 8},
-    "resume": {"enabled": true, "idle_minutes": 30}
+    "resume": {"enabled": true, "idle_minutes": 30},
+    "ssh": {"keepalive": true, "server_alive_interval_s": 15,
+            "server_alive_count_max": 3, "disconnect_notice": true}
   }
 }
 ```
@@ -404,6 +428,9 @@ missing or invalid values fall back to the defaults shown here:
 - `ask.carry_draft` — carry the half-typed shell line into the request as redacted context (default on).
 - `ask.max_turns` — conversation turns kept for follow-up context.
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
+- `ssh.keepalive` — add scoped OpenSSH server-alive probes in default integrated Bash panes (default on).
+- `ssh.server_alive_interval_s` / `ssh.server_alive_count_max` — probe interval and missed-reply limit; either `0` disables the wrapper.
+- `ssh.disconnect_notice` — show the safe Reconnect / Close Pane notice after a confirmed OpenSSH disconnect.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
 (see ADR [0009](decisions/0009-session-persistence-format.md)); every
