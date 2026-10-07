@@ -9,15 +9,33 @@ accepted — always without a trailing newline, so nothing runs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent_terminal.copilot import fuzzy
+from agent_terminal.copilot import ranking as ranking_mod
 from agent_terminal.copilot import recipes as recipes_mod
 from agent_terminal.copilot import risk as risk_mod
 from agent_terminal.copilot.titles import is_trivial
 
 SOURCE_RECIPE = "recipe"
 SOURCE_HISTORY = "history"
+
+# -- normalized score bands ----------------------------------------------
+#
+# Sources produce scores on wildly different natural scales (frecency is
+# roughly 0-8, fuzzy roughly 3-15), so comparing them raw is meaningless.
+# Each source is squashed into (0, 1) and multiplied by its band ceiling,
+# which makes one ranked list out of all of them.
+CORPUS_CEILING = 10.0     # your own usage, frecency-ranked
+RECIPE_CEILING = 7.0      # generic builtins: below your habits, above noise
+_CORPUS_SCALE = 2.0       # typical frecency magnitude
+_RECIPE_SCALE = 8.0       # typical fuzzy magnitude
+
+# Merge bands (see merge_suggestions). Higher bands win outright; within a
+# band, the normalized score decides.
+BAND_CORRECTION = 300.0   # "did you mean" — a typo fix always leads
+BAND_ARGUMENT = 200.0     # a concrete path/branch/host for the token typed
+BAND_PRIMARY = 100.0      # habits, project/README commands, recipes
 
 # History outranks an identical recipe (it is what this user actually runs),
 # and, all else equal, ranks slightly above recipes on ties.
@@ -59,9 +77,84 @@ def _dedupe_history(commands):
     return ordered
 
 
+def build_corpus_suggestions(query, corpus, *, recipes=(), cwd=None,
+                             project_root=None, now=None, config=None,
+                             prev_command=None, limit=8):
+    """Menu suggestions ranked against the persistent corpus.
+
+    The corpus-backed counterpart to build_suggestions(): same output
+    shape, but scored by frecency + context instead of raw fuzzy bonuses,
+    and normalized so corpus and recipe scores are directly comparable.
+    """
+    query = query or ""
+    ranked = ranking_mod.rank(
+        corpus, typed=query, cwd=cwd, project_root=project_root, now=now,
+        config=config, prev_command=prev_command)
+    by_command = {}
+    for scored in ranked:
+        if is_trivial(scored.command):
+            continue
+        by_command[scored.command] = Suggestion(
+            command=scored.command, label="history", source=SOURCE_HISTORY,
+            risk=risk_mod.classify(scored.command),
+            score=CORPUS_CEILING * ranking_mod.squash(scored.score,
+                                                     _CORPUS_SCALE))
+    for recipe in recipes:
+        if recipe.command in by_command:
+            continue           # your own version of it already ranked
+        value = fuzzy.score(query, recipe.haystack())
+        if value is None:
+            continue
+        by_command[recipe.command] = Suggestion(
+            command=recipe.command, label="recipe", source=SOURCE_RECIPE,
+            risk=recipe.risk or risk_mod.classify(recipe.command),
+            score=RECIPE_CEILING * ranking_mod.squash(value, _RECIPE_SCALE),
+            description=recipe.description)
+    out = sorted(by_command.values(), key=lambda s: (-s.score, s.command))
+    return out[:limit] if limit is not None else out
+
+
+def normalized(suggestions, *, ceiling=CORPUS_CEILING, scale=_RECIPE_SCALE):
+    """Re-scale raw build_suggestions() scores into the normalized band.
+
+    The corpus-free path still produces unbounded fuzzy scores; squashing
+    them keeps the banded merge comparable whichever path produced them.
+    """
+    return [replace(s, score=ceiling * ranking_mod.squash(s.score, scale))
+            for s in suggestions]
+
+
+def merge_suggestions(*groups, limit=12):
+    """Merge banded suggestion groups into one ranked, deduplicated list.
+
+    Each group is ``(band, suggestions)``. Ordering is by band first, then
+    by normalized score — so a strong habit can outrank a weak README
+    command, while a concrete argument completion still leads them both.
+    Previously the menu ordered purely by which source ran first, which
+    made scores decorative.
+    """
+    ordered = []
+    for band, suggestions in groups:
+        for suggestion in suggestions or ():
+            ordered.append((band, suggestion))
+    ordered.sort(key=lambda pair: (-pair[0], -pair[1].score,
+                                   pair[1].command))
+    out, seen = [], set()
+    for _, suggestion in ordered:
+        if suggestion.command in seen:
+            continue
+        seen.add(suggestion.command)
+        out.append(suggestion)
+    return out[:limit] if limit is not None else out
+
+
 def build_suggestions(query, *, recipes=recipes_mod.BUILTIN_RECIPES,
                       history=(), limit=8):
-    """Ranked, deduplicated suggestions for the completion menu."""
+    """Ranked, deduplicated suggestions for the completion menu.
+
+    The corpus-free path, used when `completion.corpus` is disabled; see
+    build_corpus_suggestions() for the frecency-ranked one.
+    """
     query = query or ""
     by_command = {}
 
@@ -102,13 +195,45 @@ _GHOST_MIN_PREFIX = 2
 _GHOST_SAFE_RISK = frozenset({risk_mod.READ_ONLY, risk_mod.LOCAL_CHANGE})
 
 
+def ghost_suffix(command, typed):
+    """The renderable suffix of `command` after `typed`, or None."""
+    if not command or not command.startswith(typed) or command == typed:
+        return None
+    if risk_mod.classify(command).display not in _GHOST_SAFE_RISK:
+        return None
+    suffix = command[len(typed):]
+    if "\n" in suffix or not suffix:
+        return None
+    return suffix
+
+
+def corpus_ghost_completion(typed, corpus, *, cwd=None, project_root=None,
+                            now=None, config=None, prev_command=None,
+                            min_confidence=0.7):
+    """Ghost suffix ranked against the persistent corpus, or None.
+
+    Unlike the history path below, the confidence gate here is a real
+    measurement — how far the winner dominates the best rival proposing a
+    different suffix — so min_confidence genuinely controls how eagerly
+    ghost text appears.
+    """
+    if len(typed) < _GHOST_MIN_PREFIX:
+        return None
+    command, _ = ranking_mod.best_completion(
+        corpus, typed, cwd=cwd, project_root=project_root, now=now,
+        config=config, prev_command=prev_command,
+        min_confidence=min_confidence)
+    return ghost_suffix(command, typed)
+
+
 def ghost_completion(typed, *, recipes=recipes_mod.BUILTIN_RECIPES,
                      history=(), min_confidence=0.7):
     """Suffix to show as inline ghost text after `typed`, or None.
 
-    Prefers the most recent history command that extends the prefix,
-    then a recipe. Never ghosts a destructive/privileged/unknown command
-    (design doc 8.4), a multi-line command, or below min_confidence.
+    The corpus-free path: prefers the most recent history command that
+    extends the prefix, then a recipe. Never ghosts a
+    destructive/privileged/unknown command (design doc 8.4), a multi-line
+    command, or below min_confidence.
     """
     if len(typed) < _GHOST_MIN_PREFIX:
         return None

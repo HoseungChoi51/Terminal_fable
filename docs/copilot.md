@@ -161,7 +161,9 @@ language model, both **off by default** and gated:
   `assistant.llm.send_output` (default `"digest"`; see below).
 
   A **status bar** along the window bottom always shows the attached
-  model, abbreviated (e.g. `⌁ copilot: loki`). Click it or press
+  model, abbreviated (e.g. `⌁ copilot: loki`), plus the active terminal's
+  current directory (with the home directory shortened to `~`). Click the
+  model or press
   **Ctrl+Shift+M** to open the **model picker** — it shows the full
   local-first chain and lists the models the primary endpoint advertises
   (e.g. a LiteLLM gateway fronting several backends); pick one to pin it
@@ -257,8 +259,12 @@ newline, so nothing runs — or **Esc** to dismiss it. It shows only at a
 clean prompt and vanishes the moment anything is uncertain (you scroll,
 resize, run a program, use arrows/Ctrl-R/Tab, or the screen no longer
 matches what it thinks you typed). It never completes a destructive,
-privileged, or unknown command. Recipes are included only if you lower
-`suggestions.min_confidence` below `0.7`.
+privileged, or unknown command.
+
+What it completes *from* is now a persistent, directory-aware corpus rather
+than the current pane's in-memory history, and `min_confidence` is a real
+measurement of how far the winning candidate dominates its rivals — see
+**[completion.md](completion.md)** for the ranking model and its settings.
 
 This is the newest and least-proven feature — it is default-off pending
 a dogfooding soak (vim/tmux/paste/resize/wrapped lines). Enable it with:
@@ -285,6 +291,23 @@ non-bash shells, when disabled in config, and when
 `AGENT_TERMINAL_NO_INTEGRATION=1` is set. Without integration the
 terminal still tracks the working directory (OSC 7), so directory-based
 features keep working.
+
+### SSH connection liveness
+
+In Terminal Fable's default interactive Bash panes, OpenSSH gets an
+application-level keepalive by default: every 15 seconds it probes the remote
+server and gives up after three missed replies (about 45 seconds). This keeps a
+server shutdown or network black hole from leaving the `ssh` client hung
+indefinitely. The settings are scoped to this terminal only: Terminal Fable
+does not edit `~/.ssh/config` or affect other terminal apps.
+
+This works for `ssh` itself and for aliases/functions such as `connect-x670`
+that invoke `ssh`. A user-defined `ssh` *function* is preserved rather than
+wrapped, as it may own special transport behavior. Explicit `--command`
+launches, non-Bash shells, and standalone scripts are likewise untouched.
+
+If you need to end a currently stuck OpenSSH client immediately,
+press Enter and then type `~.` (the standard local OpenSSH escape).
 
 **A note on a possible brief flash.** The integration works by having
 the shell emit small marker escape sequences (OSC 666 termprops) each
@@ -318,7 +341,12 @@ the snippet to your shell startup yourself:
 ```
 
 The snippet is bash-only and idempotent; sourcing it twice is
-harmless.
+harmless. It also keeps the most actionable shell context beside your input:
+for prompts using Bash's standard `\w`/`\W` cwd escape and `\$` prompt mark,
+the cwd moves to the lower status bar and the prompt shows `repo: branch`
+directly before `$` or `#`, with the repository in bright cyan and the branch
+in bright magenta (`repo: @commit` for a detached HEAD). Custom prompts
+without a `\$` mark are not rewritten.
 
 ## Configuration
 
@@ -344,7 +372,9 @@ missing or invalid values fall back to the defaults shown here:
     "ask": {"enabled": true, "auto_pilot": false,
             "auto_pilot_max_risk": "local-change", "carry_draft": true,
             "max_turns": 8},
-    "resume": {"enabled": true, "idle_minutes": 30}
+    "resume": {"enabled": true, "idle_minutes": 30},
+    "ssh": {"keepalive": true, "server_alive_interval_s": 15,
+            "server_alive_count_max": 3}
   }
 }
 ```
@@ -356,7 +386,10 @@ missing or invalid values fall back to the defaults shown here:
 - `journal.output_tail_lines` — how many trailing output lines to keep.
 - `suggestions.menu` — enable the Ctrl+Shift+Space command menu.
 - `suggestions.ghost_text` — inline history completion at the cursor (default off).
-- `suggestions.min_confidence` — threshold for ghost text (lower to include recipes).
+- `suggestions.min_confidence` — how far the top candidate must dominate its
+  rivals before ghost text is shown (lower it to see more suggestions).
+- `completion.*` — the deterministic completion corpus and ranking model; see
+  [completion.md](completion.md).
 - `recipes.enabled` — include built-in recipes in the menu.
 - `titles.enabled` — infer tab titles from the journal.
 - `titles.min_interval_s` — minimum seconds between title changes (anti-flicker).
@@ -390,6 +423,8 @@ missing or invalid values fall back to the defaults shown here:
 - `ask.carry_draft` — carry the half-typed shell line into the request as redacted context (default on).
 - `ask.max_turns` — conversation turns kept for follow-up context.
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
+- `ssh.keepalive` — add scoped OpenSSH server-alive probes in default integrated Bash panes (default on).
+- `ssh.server_alive_interval_s` / `ssh.server_alive_count_max` — probe interval and missed-reply limit; either `0` disables the wrapper.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
 (see ADR [0009](decisions/0009-session-persistence-format.md)); every

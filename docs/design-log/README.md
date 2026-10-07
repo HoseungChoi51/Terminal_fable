@@ -44,3 +44,7 @@ the user's own words. The broad roadmap remains in `copilot-development-plan.md`
 | [0009](0009-acp-evaluation.md) | Should we adopt ACP? | — | Decided against |
 | [0010](0010-ask-mode-terminal-context.md) | Terminal output as ask-mode context (+ LLM A/B mode) | [0008](../decisions/0008-llm-provider-and-remote-gate.md) | Built |
 | [0011](0011-workspaces.md) | Workspaces: episode resume, job grouping, live pane moves, naming | [0011](../decisions/0011-workspaces-and-live-pane-moves.md) | Built |
+| [0012](0012-sls-decoupling.md) | Should `sls` be split out of the terminal? — keep + decouple | [0004](../decisions/0004-shared-tui-core-and-smart-ls.md) | Built |
+| [0013](0013-detachable-panes.md) | Make pane processes survive disconnection (tmux-style) | [0012](../decisions/0012-detachable-panes-pty-daemon.md) | Built (1–3) |
+| [0013](0013-readme-demo-recording.md) | A recorded demo of the usecase for the README | — | Built |
+| [0014](0014-non-llm-completion.md) | A robust non-LLM algorithm for command autocompletion | [0013](../decisions/0013-frecency-completion-corpus.md) | Built (A) |

@@ -91,8 +91,12 @@ class _Pending:
 class PaneJournal:
     """Pure ring of finished commands plus live capture state."""
 
-    def __init__(self, config: JournalConfig | None = None):
+    def __init__(self, config: JournalConfig | None = None, *, sink=None):
         self.config = config or JournalConfig()
+        # Optional durable sink, called sink(record, previous_cmd) as each
+        # command finalizes. Injected (not imported) so the journal stays
+        # pure and the completion corpus stays an opt-in dependency.
+        self.sink = sink
         self.records = deque(maxlen=max(self.config.max_commands, 1))
         self.integration = INTEGRATION_NONE
         self.state = "idle"           # idle | prompt | executing
@@ -189,7 +193,8 @@ class PaneJournal:
             # PEM private-key body is dropped whole, not sent line-by-line.
             parts, cmd_redacted = redact_lines(cmd.split("\n"))
             cmd = "\n".join(parts)
-        self.records.append(CommandRecord(
+        previous = self.records[-1].cmd if self.records else None
+        record = CommandRecord(
             seq=next(self._seq),
             cmd=cmd,
             cwd=pending.cwd,
@@ -200,7 +205,14 @@ class PaneJournal:
             capture=CAPTURE_TERMPROP if cmd is not None else CAPTURE_NONE,
             redacted=redacted or cmd_redacted,
             digest=dg,
-        ))
+        )
+        self.records.append(record)
+        if self.sink is not None and cmd is not None:
+            # A completion store must never break command tracking.
+            try:
+                self.sink(record, previous)
+            except Exception:
+                pass
 
     # -- queries ----------------------------------------------------------
 

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512" height="512" viewBox="0 0 512 512">
+  <title>Agent Terminal</title>
+  <defs>
+    <linearGradient id="frame" x1="72" y1="56" x2="440" y2="456"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4aa5f0"/>
+      <stop offset="0.55" stop-color="#42b3c2"/>
+      <stop offset="1" stop-color="#8cc265"/>
+    </linearGradient>
+    <linearGradient id="prompt" x1="130" y1="218" x2="276" y2="306"
+                    gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4dc4ff"/>
+      <stop offset="1" stop-color="#8cc265"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The rounded tile follows the app's dark palette; the inner divisions
+       echo Terminal Fable's split-pane layout. -->
+  <rect x="28" y="28" width="456" height="456" rx="112"
+        fill="url(#frame)"/>
+  <rect x="48" y="48" width="416" height="416" rx="94"
+        fill="#11151c"/>
+  <rect x="82" y="94" width="348" height="324" rx="42"
+        fill="#1c2128" stroke="#475061" stroke-width="10"/>
+
+  <path d="M87 168h338" fill="none" stroke="#475061" stroke-width="10"/>
+  <circle cx="120" cy="131" r="10" fill="#e05561"/>
+  <circle cx="153" cy="131" r="10" fill="#d18f52"/>
+  <circle cx="186" cy="131" r="10" fill="#8cc265"/>
+
+  <path d="M303 173v240M303 286h122" fill="none"
+        stroke="#475061" stroke-width="10"/>
+
+  <path d="m132 224 48 38-48 38M207 310h62" fill="none"
+        stroke="url(#prompt)" stroke-width="20" stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <path d="M337 220h52M337 246h34" fill="none" stroke="#c162de"
+        stroke-width="13" stroke-linecap="round"/>
+  <path d="M337 334h52M337 360h31" fill="none" stroke="#4aa5f0"
+        stroke-width="13" stroke-linecap="round"/>
+</svg>

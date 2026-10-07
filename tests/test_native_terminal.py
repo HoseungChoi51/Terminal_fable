@@ -12,9 +12,11 @@ import re
 import stat
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from agent_terminal import native_terminal as nt
+from agent_terminal.copilot import config as assistant_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (REPO_ROOT / "agent_terminal" / "native_terminal.py").read_text(
@@ -151,6 +153,30 @@ class OptionTests(unittest.TestCase):
     def test_control_socket_path_is_process_local(self):
         path = nt.default_control_socket_path(1234)
         self.assertIn("agent-terminal-native-1234.sock", path)
+
+    def test_status_path_abbreviates_only_the_home_tree(self):
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice", "/home/alice"), "~")
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice/work/repo", "/home/alice"),
+            "~/work/repo")
+        self.assertEqual(
+            nt.abbreviate_home_path("/home/alice-archive", "/home/alice"),
+            "/home/alice-archive")
+        self.assertEqual(nt.abbreviate_home_path(None, "/home/alice"), "")
+
+    def test_ssh_keepalive_env_is_scoped_and_validated(self):
+        cfg = assistant_config.parse_assistant_config({})
+        self.assertEqual(nt.ssh_keepalive_env(cfg), {
+            nt.SSH_SERVER_ALIVE_INTERVAL_ENV: "15",
+            nt.SSH_SERVER_ALIVE_COUNT_MAX_ENV: "3",
+        })
+        disabled = assistant_config.parse_assistant_config(
+            {"ssh": {"keepalive": False}})
+        self.assertEqual(nt.ssh_keepalive_env(disabled), {})
+        zero = assistant_config.parse_assistant_config(
+            {"ssh": {"server_alive_interval_s": 0}})
+        self.assertEqual(nt.ssh_keepalive_env(zero), {})
 
 
 def grid_2x2():
@@ -587,8 +613,8 @@ class ActionTests(unittest.TestCase):
         "increase-width", "decrease-width", "increase-height",
         "decrease-height",
         "undo-layout", "redo-layout",
-        "copy", "paste", "select-all", "find", "find-next", "find-previous",
-        "reset", "reload-pane", "clear-scrollback",
+        "copy", "copy-one-line", "paste", "select-all", "find", "find-next",
+        "find-previous", "reset", "reload-pane", "clear-scrollback",
         "zoom-in", "zoom-out", "zoom-reset",
         "copilot-menu", "copilot-ask", "copilot-pause", "copilot-sessions",
         "copilot-debug",
@@ -614,6 +640,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("<Alt><Shift>f", nt.ACCELERATORS["fit-focused"])
         self.assertIn("<Alt><Shift>space", nt.ACCELERATORS["pane-leader"])
         self.assertIn("<Ctrl><Shift>c", nt.ACCELERATORS["copy"])
+        self.assertIn("<Ctrl><Alt>c", nt.ACCELERATORS["copy-one-line"])
         self.assertIn("<Ctrl><Shift>v", nt.ACCELERATORS["paste"])
         self.assertIn("<Ctrl><Shift>f", nt.ACCELERATORS["find"])
         self.assertIn("F5", nt.ACCELERATORS["reload-pane"])
@@ -725,7 +752,22 @@ class SourceGuardrailTests(unittest.TestCase):
     def test_terminal_uses_vte(self):
         self.assertIn("Vte.Terminal()", SOURCE)
         self.assertIn("spawn_async", SOURCE)
-        self.assertIn(nt.CONTROL_SOCKET_ENV, SOURCE)
+        # The control-socket env var now lives in tui_core; the terminal still
+        # exports it to child processes (re-exported name used in the spawn).
+        self.assertEqual(nt.CONTROL_SOCKET_ENV,
+                         "AGENT_TERMINAL_NATIVE_CONTROL_SOCKET")
+        self.assertIn("env[CONTROL_SOCKET_ENV] = control_socket_path", SOURCE)
+
+    def test_background_terminal_bell_becomes_desktop_notification(self):
+        self.assertIn('self.terminal.connect("bell", self._on_bell)', SOURCE)
+        handler = SOURCE.split("def _on_bell(self, terminal):", 1)[1].split(
+            "def _withdraw_bell_notification", 1)[0]
+        self.assertIn("if terminal.has_focus():", handler)
+        self.assertIn("Gio.Notification.new(", handler)
+        self.assertIn("app.send_notification(", handler)
+        self.assertIn("Gio.ThemedIcon.new(APP_ID)", handler)
+        self.assertIn('self.terminal.connect("notify::has-focus"', SOURCE)
+        self.assertIn("app.withdraw_notification(", SOURCE)
 
     def test_picker_window_is_transient(self):
         self.assertIn("set_transient_for(", SOURCE)
@@ -790,6 +832,37 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def show_model_picker(self)", SOURCE)
         self.assertIn('"win.copilot-model"', SOURCE)
 
+    def test_persistent_pane_spawn_wired(self):
+        # Persistence routes the shell through the ptyd attach client (opt-in,
+        # fails open); reattach skips --create.
+        self.assertIn("from agent_terminal import ptyd", SOURCE)
+        self.assertIn("class PersistenceConfig", SOURCE)
+        self.assertIn("def ptyd_attach_argv(session_id, shell_argv, cwd",
+                      SOURCE)
+        self.assertIn("argv = ptyd_attach_argv(", SOURCE)
+        self.assertIn("create=not self.reattach", SOURCE)
+        # only the default shell is persisted, and any failure falls back to a
+        # direct spawn
+        spawn = SOURCE.split("def _spawn(self", 1)[1].split(
+            "spawn_async", 1)[0]
+        self.assertIn("command is None and persistence is not None", spawn)
+        self.assertIn("except Exception:", spawn)      # fail open
+
+    def test_reattach_and_detach_wired(self):
+        # Detachable sessions surface for reattach/kill; detach closes the
+        # frontend but leaves the process; a startup nudge points at them.
+        self.assertIn("def _orphaned_sessions(self)", SOURCE)
+        self.assertIn("def _reattach_session(self, info)", SOURCE)
+        self.assertIn("def detach_active_pane(self)", SOURCE)
+        self.assertIn("def _maybe_prompt_reattach(self)", SOURCE)
+        self.assertIn("ptyd.list_sessions()", SOURCE)
+        self.assertIn("ptyd.kill_session(info.id)", SOURCE)
+        self.assertIn("pane-detach", nt.ACTION_NAMES)
+        self.assertIn("add_terminal_tab(working_directory=cwd, "
+                      "session_id=info.id", SOURCE)
+        # a reattach must still route through ptyd even if the default is off
+        self.assertIn("persistence.enabled or self.reattach", SOURCE)
+
     def test_naming_wired(self):
         # Manual rename + LLM name suggestions; a name overrides the inferred
         # title, and the naming context is the redacted digest (not raw).
@@ -813,17 +886,22 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("def _show_name_dialog(self, panes, result)", SOURCE)
 
     def test_live_pane_move_wired(self):
-        # Moving a pane between windows must reparent it alive: detach without
-        # disposing (that would kill the process), then adopt with rebound
-        # window callbacks.
+        # Moving a pane between tabs or windows must reparent it alive: detach
+        # without disposing (that would kill the process), then adopt with
+        # rebound window callbacks.
         self.assertIn("def detach_pane(self, pane_id)", SOURCE)
         self.assertIn("def adopt_pane(self, pane, orientation=HORIZONTAL)",
                       SOURCE)
+        self.assertIn("def move_active_pane_to_tab(self, target, "
+                      "orientation=HORIZONTAL)", SOURCE)
         self.assertIn("def eject_active_pane(self)", SOURCE)
-        self.assertIn("def send_active_pane_to(self, target)", SOURCE)
+        self.assertIn("def send_active_pane_to(self, target, "
+                      "orientation=HORIZONTAL)", SOURCE)
         self.assertIn("pane-eject", nt.ACTION_NAMES)
         self.assertIn("pane-send", nt.ACTION_NAMES)
         self.assertIn("<Alt><Shift>e", nt.ACCELERATORS["pane-eject"])
+        self.assertIn('"Move Pane to Tab or Window…", "win.pane-send"',
+                      SOURCE)
         # detach unparents the widget but never disposes the pane
         detach = SOURCE.split("def detach_pane(self, pane_id):", 1)[1] \
             .split("def adopt_pane", 1)[0]
@@ -831,8 +909,21 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertNotIn("pane.dispose()", detach)
         # adopt rebinds the window-scoped exit callback to the new window
         self.assertIn("pane.on_exited = self.window._on_pane_exited", SOURCE)
+        self.assertIn("pane.on_directory_changed = "
+                      "self.window._on_pane_directory_changed", SOURCE)
         # the tab-click controller is tracked so a move can swap it out
         self.assertIn("pane._tab_click = click", SOURCE)
+        # In-window moves target the visible tab order and preserve the
+        # requested left-right/top-bottom orientation.
+        move = SOURCE.split("def move_active_pane_to_tab", 1)[1].split(
+            "def send_active_pane_to", 1)[0]
+        self.assertIn("source.detach_pane(pane.pane_id)", move)
+        self.assertIn("target.adopt_pane(detached, orientation)", move)
+        self.assertIn("def _tabs_in_notebook_order(self)", SOURCE)
+        picker = SOURCE.split("def show_send_pane_picker", 1)[1].split(
+            "# -- naming", 1)[0]
+        self.assertIn('Gtk.Button(label="Right")', picker)
+        self.assertIn('Gtk.Button(label="Below")', picker)
 
     def test_workspace_job_restore_wired(self):
         # Detected jobs restore as one bounded split-pane window (packing),
@@ -902,6 +993,30 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("episode_now = self._current_episode()", SOURCE)
         self.assertIn('"ask-task"', SOURCE)
 
+    def test_idle_focus_grabs_run_once(self):
+        # grab_focus() returns True; handed straight to idle_add it re-runs
+        # forever, and each Gtk.Entry grab re-selects all text, so typing
+        # in the Rename dialog kept only the last character.
+        self.assertIsNone(re.search(r"idle_add\(\s*[\w.]+\.grab_focus\s*\)",
+                                    SOURCE))
+        prompt = SOURCE.split("def _prompt_text", 1)[1].split("\n        def ", 1)[0]
+        self.assertIn("entry.grab_focus(), GLib.SOURCE_REMOVE", prompt)
+
+    def test_ssh_keepalive_is_wired(self):
+        self.assertIn("def ssh_keepalive_env(assistant)", SOURCE)
+
+    def test_active_pane_cwd_is_wired_into_the_lower_status_bar(self):
+        self.assertIn('self._status_path = Gtk.Label(', SOURCE)
+        self.assertIn('font-weight: bold', nt.APP_CSS)
+        self.assertIn('bar.append(self._status_path)', SOURCE)
+        self.assertIn('def _status_directory(self):', SOURCE)
+        self.assertIn('notify::current-directory-uri', SOURCE)
+        self.assertIn('on_directory_changed=self._on_pane_directory_changed',
+                      SOURCE)
+        self.assertIn('if copilot_journal.PRECMD in names:\n'
+                      '                    self._notify_directory_changed()',
+                      SOURCE)
+
 
 class BuildInfoTests(unittest.TestCase):
     def test_reads_current_repo_revision(self):
@@ -945,14 +1060,35 @@ class PackagingTests(unittest.TestCase):
         text = script.read_text()
         self.assertIn("set -euo pipefail", text)
         self.assertIn(".local/bin", text)
+        self.assertIn('APP_ID="dev.agent.TerminalNative"', text)
+        self.assertIn("scalable/apps", text)
+        self.assertIn(
+            'rm -f "${BIN_DIR}/agent-terminal-native" "${BIN_DIR}/sls"',
+            text)
 
     def test_desktop_entry(self):
         desktop = (REPO_ROOT / "packaging"
-                   / "agent-terminal-native.desktop").read_text()
+                   / f"{nt.APP_ID}.desktop").read_text()
         self.assertIn("Type=Application", desktop)
         self.assertIn("Name=Agent Terminal", desktop)
         self.assertIn("Exec=", desktop)
+        self.assertIn(f"Icon={nt.APP_ID}", desktop)
+        self.assertIn(f"StartupWMClass={nt.APP_ID}", desktop)
         self.assertIn("Terminal=false", desktop)
+
+    def test_desktop_filename_matches_application_id(self):
+        desktop = REPO_ROOT / "packaging" / f"{nt.APP_ID}.desktop"
+        self.assertTrue(desktop.is_file())
+        self.assertFalse((REPO_ROOT / "packaging"
+                          / "agent-terminal-native.desktop").exists())
+
+    def test_scalable_app_icon(self):
+        icon = (REPO_ROOT / "packaging" / "icons" / "hicolor"
+                / "scalable" / "apps" / f"{nt.APP_ID}.svg")
+        self.assertTrue(icon.is_file())
+        root = ET.parse(icon).getroot()
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.attrib["viewBox"], "0 0 512 512")
 
 
 class ShortcutHintDetectorTests(unittest.TestCase):
@@ -999,6 +1135,78 @@ class ShortcutHintDetectorTests(unittest.TestCase):
     def test_hint_text_names_the_shortcut(self):
         self.assertIn("Ctrl+Shift+H", nt.SHORTCUT_HINT_TEXT)
         self.assertIn("Esc", nt.SHORTCUT_HINT_TEXT)
+
+
+class PersistenceConfigTests(unittest.TestCase):
+    def _load(self, data):
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as handle:
+            json.dump(data, handle)
+            path = handle.name
+        try:
+            return nt.load_native_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_default_off(self):
+        cfg = nt.load_native_config("/nonexistent")
+        self.assertFalse(cfg.persistence.enabled)
+        self.assertEqual(cfg.persistence.scrollback_bytes, 512 * 1024)
+
+    def test_enabled_and_ring(self):
+        cfg = self._load({"persistence": {"enabled": True,
+                                          "scrollback_bytes": 100000}})
+        self.assertTrue(cfg.persistence.enabled)
+        self.assertEqual(cfg.persistence.scrollback_bytes, 100000)
+
+    def test_ring_clamped_and_malformed_ignored(self):
+        self.assertEqual(self._load(
+            {"persistence": {"scrollback_bytes": 10}}
+        ).persistence.scrollback_bytes, 4096)
+        self.assertEqual(self._load(
+            {"persistence": {"scrollback_bytes": "x"}}
+        ).persistence.scrollback_bytes, 512 * 1024)
+        self.assertFalse(self._load(
+            {"persistence": "nope"}).persistence.enabled)
+
+    def test_attach_argv_shape(self):
+        argv = nt.ptyd_attach_argv("s-abc", ["/bin/bash", "-i"], "/tmp", 4096)
+        self.assertIn("-m", argv)
+        self.assertIn("agent_terminal.ptyd", argv)
+        self.assertEqual(argv[argv.index("--session") + 1], "s-abc")
+        self.assertIn("--create", argv)
+        self.assertEqual(argv[-2:], ["/bin/bash", "-i"])
+        # reattach form drops --create (and the shell argv)
+        re = nt.ptyd_attach_argv("s-abc", ["/bin/bash"], "/tmp", 4096,
+                                 create=False)
+        self.assertNotIn("--create", re)
+
+
+class JoinWrappedLinesTests(unittest.TestCase):
+    def test_app_wrapped_command_joins_with_spaces(self):
+        text = "  git log --oneline\n    --graph --all\n    | head -20\n"
+        self.assertEqual(nt.join_wrapped_lines(text),
+                         "git log --oneline --graph --all | head -20")
+
+    def test_drops_continuation_backslash_and_blank_rows(self):
+        text = "docker run \\\n\n  -it ubuntu \\\n  bash"
+        self.assertEqual(nt.join_wrapped_lines(text),
+                         "docker run -it ubuntu bash")
+
+    def test_keeps_escaped_backslash(self):
+        self.assertEqual(nt.join_wrapped_lines("echo a\\\\\nb"),
+                         "echo a\\\\ b")
+
+    def test_full_width_row_joins_without_space(self):
+        text = "curl https://exam\nple.com/path"
+        self.assertEqual(nt.join_wrapped_lines(text, columns=17),
+                         "curl https://example.com/path")
+        self.assertEqual(nt.join_wrapped_lines(text, columns=80),
+                         "curl https://exam ple.com/path")
+
+    def test_single_line_unchanged(self):
+        self.assertEqual(nt.join_wrapped_lines("ls -la"), "ls -la")
+        self.assertEqual(nt.join_wrapped_lines(""), "")
 
 
 if __name__ == "__main__":

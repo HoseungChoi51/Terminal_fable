@@ -42,6 +42,32 @@ class SuggestionsConfig:
 
 
 @dataclass(frozen=True)
+class CompletionConfig:
+    """The deterministic (non-LLM) completion engine: corpus + ranking.
+
+    `suggestions` above configures the *surfaces* (menu, ghost text, the
+    confidence gate); this configures the algorithm behind them.
+    """
+    # Ranking model driving both surfaces:
+    #   "frecency" — frequency x recency, scoped by cwd/project (default)
+    #   "chain"    — frecency plus a bigram model of what follows what
+    #   "token"    — chain plus per-token argument completion
+    # Anything else falls back to "frecency".
+    ranking: str = "frecency"
+    # Persist observed commands so ranking survives a restart.
+    corpus: bool = True
+    max_entries: int = 5000
+    # Recency half-life: a command's weight halves every N days.
+    half_life_days: int = 14
+    # Cold-start the corpus from ~/.bash_history the first time, so
+    # ranking is useful on day one instead of after weeks of dogfooding.
+    seed_bash_history: bool = True
+    # Ask a *separate* non-interactive bash for argument completions
+    # (compgen). Never touches the live shell.
+    shell_completion: bool = True
+
+
+@dataclass(frozen=True)
 class RecipesConfig:
     enabled: bool = True
     user_recipes_path: str | None = None
@@ -95,6 +121,19 @@ class ResumeConfig:
 
 
 @dataclass(frozen=True)
+class SshConfig:
+    """Connection liveness for OpenSSH started in an integrated Bash pane.
+
+    The values become command-line options only inside Terminal Fable's
+    default interactive Bash shell; they never edit the user's SSH config or
+    affect another terminal.  A zero interval/count disables the wrapper.
+    """
+    keepalive: bool = True
+    server_alive_interval_s: int = 15
+    server_alive_count_max: int = 3
+
+
+@dataclass(frozen=True)
 class WorkspaceConfig:
     """Grouping sessions into jobs and laying them out as split panes."""
     # Legibility floor: a restored pane is never sub-divided below this.
@@ -116,10 +155,12 @@ class AssistantConfig:
     titles: TitlesConfig = field(default_factory=TitlesConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
     suggestions: SuggestionsConfig = field(default_factory=SuggestionsConfig)
+    completion: CompletionConfig = field(default_factory=CompletionConfig)
     recipes: RecipesConfig = field(default_factory=RecipesConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     ask: AskConfig = field(default_factory=AskConfig)
     resume: ResumeConfig = field(default_factory=ResumeConfig)
+    ssh: SshConfig = field(default_factory=SshConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
 
 
@@ -159,6 +200,10 @@ def _parse_section(cls, payload):
         elif spec.name == "digest_mode":
             values[spec.name] = _enum(
                 payload.get(spec.name), default, ("heuristic", "llm"))
+        elif spec.name == "ranking":
+            values[spec.name] = _enum(
+                payload.get(spec.name), default,
+                ("frecency", "chain", "token"))
         else:
             values[spec.name] = _coerce(payload.get(spec.name), default)
     return cls(**values)
@@ -185,10 +230,12 @@ _SECTIONS = {
     "titles": TitlesConfig,
     "sessions": SessionsConfig,
     "suggestions": SuggestionsConfig,
+    "completion": CompletionConfig,
     "recipes": RecipesConfig,
     "llm": LlmConfig,
     "ask": AskConfig,
     "resume": ResumeConfig,
+    "ssh": SshConfig,
     "workspace": WorkspaceConfig,
 }
 

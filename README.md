@@ -1,5 +1,13 @@
 # Terminal Fable
 
+![Terminal Fable: split panes, the sls browser, and in-place ask mode](docs/demo/demo.gif)
+
+*Split a pane, browse with `sls`, run the tests — then type half a command,
+press `Ctrl+?`, and ask. The copilot carries your draft in as context, answers
+with a risk badge, and `Take` puts the command on the prompt without running
+it.* ([WebP version](docs/demo/demo.webp) · recorded by
+[`bin/record-demo`](tools/demo/record_demo.py))
+
 A native Linux terminal with cmux-style split panes, built on GTK 4 and
 VTE. One window holds tabs; each tab holds an n-ary split tree of panes.
 Panes can be interactive terminals, rendered Markdown viewers, or native
@@ -90,12 +98,14 @@ Alt+Shift+Arrows  focus panes
 Alt+Shift+F       temporary focus fit
 Alt+Shift+Space   pane control mode
 Ctrl+Shift+C/V    copy / paste
+Ctrl+Alt+C        copy selection as one line (unwrap app-wrapped commands)
 Ctrl+Shift+F      find
 Ctrl+Shift+Space  command menu (copilot)
 Ctrl+?            ask mode — chat at the prompt (copilot)
 Ctrl+Shift+M      expand copilot model chain in the status bar
 Ctrl+Shift+S      session history (copilot)
 Alt+Shift+A       pause/resume copilot (active pane)
+Alt+Shift+G       move pane into another tab/window
 F5                reload viewer
 F / 1             image fit / actual size
 Esc               viewer → input back to terminal
@@ -105,13 +115,23 @@ Ctrl+Shift+H, F1  shortcut guide
 The full table is in `docs/native-terminal-mvp.md` and in the in-app
 shortcut guide.
 
+To turn two tabs into split panes, activate the pane you want to move, press
+`Alt+Shift+G` (or choose **Move Pane to Tab or Window…**), select the other
+tab, then choose **Right** or **Below**. If that was the source tab's last
+pane, the empty tab closes automatically; the running process and scrollback
+are preserved.
+
 ## Install a user-local launcher
 
 ```bash
 packaging/install.sh
 ```
 
-This installs `~/.local/bin/agent-terminal-native` and a desktop entry.
+This installs `~/.local/bin/agent-terminal-native`, the app's scalable icon,
+and a desktop entry whose identity matches the GTK application ID. On Ubuntu,
+that identity makes windows from separate launches share one dock icon and one
+Alt+Tab application group. Re-run the installer after updating an older copy;
+if the old launcher was pinned, unpin it and pin Agent Terminal again once.
 
 To bind it to **Ctrl+Alt+T** as the default terminal and recover when a
 broken edit breaks the shortcut, see

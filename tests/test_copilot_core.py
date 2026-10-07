@@ -1,6 +1,7 @@
 """Unit-level contracts for the copilot P0 pure core."""
 
 import base64
+import os
 import subprocess
 import tempfile
 import unittest
@@ -23,6 +24,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.journal.max_commands, 200)
         self.assertFalse(cfg.suggestions.ghost_text)
         self.assertFalse(cfg.llm.allow_remote_context)
+        self.assertTrue(cfg.ssh.keepalive)
+        self.assertEqual(cfg.ssh.server_alive_interval_s, 15)
+        self.assertEqual(cfg.ssh.server_alive_count_max, 3)
 
     def test_valid_payload(self):
         cfg = cconfig.parse_assistant_config({
@@ -86,6 +90,16 @@ class ConfigTests(unittest.TestCase):
                                "job_gap_minutes": 10}}).workspace
         self.assertEqual(ws2.max_panes_per_window, 4)
         self.assertEqual(ws2.job_gap_minutes, 10)
+
+    def test_ssh_config_defaults_and_parse(self):
+        cfg = cconfig.parse_assistant_config({
+            "ssh": {"keepalive": False,
+                    "server_alive_interval_s": 30,
+                    "server_alive_count_max": 5},
+        }).ssh
+        self.assertFalse(cfg.keepalive)
+        self.assertEqual(cfg.server_alive_interval_s, 30)
+        self.assertEqual(cfg.server_alive_count_max, 5)
 
 
 class RedactTests(unittest.TestCase):
@@ -378,10 +392,98 @@ class SnippetGuardrailTests(unittest.TestCase):
         self.assertIn('PROMPT_COMMAND="_agentterm_precmd'
                       '${PROMPT_COMMAND:+;$PROMPT_COMMAND}"', self.text)
 
+    def _source_with_prompt(self, prompt, *, cwd=None, command=None):
+        script = command or '. "$2"; printf "%s" "$PS1"'
+        result = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             'PS1=$1; cd "$3"; ' + script,
+             "agent-terminal-test", prompt, str(SNIPPET), cwd or os.getcwd()],
+            capture_output=True, text=True, check=True)
+        return result.stdout
+
+    def test_prompt_moves_standard_cwd_and_puts_git_before_mark(self):
+        prompt = self._source_with_prompt(r"\u@\h:\w\$ ")
+        self.assertNotIn(r"\w", prompt)
+        self.assertNotIn(r"\W", prompt)
+        git_segment = (
+            r"\[\e[1;36m\]${_agentterm_repo}\[\e[0m\]: "
+            r"\[\e[1;35m\]${_agentterm_branch}\[\e[0m\]\$")
+        self.assertIn(git_segment, prompt)
+        self.assertLess(prompt.index(r"${_agentterm_repo}"),
+                        prompt.index(r"${_agentterm_branch}"))
+        self.assertLess(prompt.index(r"${_agentterm_branch}"),
+                        prompt.rindex(r"\$"))
+
+        short_prompt = self._source_with_prompt(r"\W\$ ")
+        self.assertNotIn(r"\W", short_prompt)
+        self.assertIn(git_segment, short_prompt)
+
+    def test_prompt_without_privilege_sensitive_mark_is_preserved(self):
+        self.assertEqual(self._source_with_prompt("custom> "), "custom> ")
+
+    def test_git_prompt_tracks_repo_and_branch_and_hides_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "sample-repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "symbolic-ref", "HEAD",
+                 "refs/heads/topic/prompt"], check=True)
+            branch = self._source_with_prompt(
+                r"\$ ", cwd=repo,
+                command=('. "$2"; printf "%s|%s" '
+                         '"$_agentterm_repo" "$_agentterm_branch"'))
+            self.assertEqual(branch, "sample-repo|topic/prompt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = self._source_with_prompt(
+                r"\$ ", cwd=tmp,
+                command=('. "$2"; printf "%s|%s" '
+                         '"$_agentterm_repo" "$_agentterm_branch"'))
+            self.assertEqual(outside, "|")
+
+    def test_precmd_resets_stale_mouse_and_focus_reporting(self):
+        # A remote tmux whose SSH link died leaves mouse tracking on; the
+        # prompt hook must switch it off so motion isn't typed into bash.
+        out = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f". '{SNIPPET}'; _agentterm_precmd"],
+            capture_output=True, text=True, check=True).stdout
+        precmd = out.index("vte.shell.precmd!")
+        for mode in (9, 1000, 1001, 1002, 1003, 1004,
+                     1005, 1006, 1015, 1016):
+            seq = f"\x1b[?{mode}l"
+            self.assertIn(seq, out)
+            self.assertGreater(out.index(seq), precmd)
+        self.assertNotIn("\x1b[?2004l", out)   # Readline owns bracketed paste
+
     def test_emits_all_termprops(self):
         for token in ("vte.shell.preexec", "vte.shell.postexec",
                       "vte.shell.precmd", "vte.ext.agentterm.cmd"):
             self.assertIn(token, self.text)
+
+    def test_ssh_keepalive_wrapper_is_scoped_and_preserves_user_function(self):
+        self.assertIn("AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL", self.text)
+        self.assertIn("AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX", self.text)
+        self.assertIn("ServerAliveInterval=", self.text)
+        self.assertIn("ServerAliveCountMax=", self.text)
+        self.assertIn("declare -F ssh", self.text)
+
+        env = dict(os.environ, AGENT_TERMINAL_SSH_SERVER_ALIVE_INTERVAL="15",
+                   AGENT_TERMINAL_SSH_SERVER_ALIVE_COUNT_MAX="3")
+        wrapped = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f". '{SNIPPET}'; declare -f ssh"],
+            env=env, capture_output=True, text=True, check=True).stdout
+        self.assertIn("ServerAliveInterval=", wrapped)
+        self.assertIn("ServerAliveCountMax=", wrapped)
+
+        preserved = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f"ssh() {{ echo user-wrapper; }}; . '{SNIPPET}'; declare -f ssh"],
+            env=env, capture_output=True, text=True, check=True).stdout
+        self.assertIn("echo user-wrapper", preserved)
+        self.assertNotIn("ServerAliveInterval=", preserved)
 
     def test_seed_block_placement(self):
         # Episode history seed: recall the episode, relocate HISTFILE off the

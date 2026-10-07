@@ -45,3 +45,18 @@ browser as a GTK pane inside the app.
   the regression proof for the extraction.
 - A future GTK front-end for the browser remains possible: it would
   consume the same `tui_core` + pure smart-ls helpers.
+
+## Amendment (2026-07 — full decoupling)
+
+The decision to keep smart-ls a standalone subprocess (not a separate
+package) was reaffirmed, and the one remaining coupling was removed:
+`smart_ls` had imported `CONTROL_SOCKET_ENV`, `is_image_path`, and
+`is_markdown_path` from `native_terminal`, which transitively pulled the
+whole GTK-shell module (and the copilot package) into a curses tool. Those
+symbols moved into `tui_core` (the shared, GTK-free/curses-free layer);
+`native_terminal` and `tui_navigation` now consume them from there, and
+`native_terminal` re-exports them for back-compat. Importing `smart_ls` no
+longer imports `native_terminal` or `gi` at all — the "runs in any
+terminal" property is now enforced by the dependency graph, not just by
+lazy GTK loading. See design-log
+[0012](../design-log/0012-sls-decoupling.md).

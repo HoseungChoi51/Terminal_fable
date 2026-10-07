@@ -16,10 +16,9 @@ import argparse
 import os
 from pathlib import Path
 
-from agent_terminal.native_terminal import CONTROL_SOCKET_ENV
-from agent_terminal.tui_core import (PickerEntry, control_message,
-                                     encode_message, list_directory,
-                                     send_control_message)
+from agent_terminal.tui_core import (CONTROL_SOCKET_ENV, PickerEntry,
+                                     control_message, encode_message,
+                                     list_directory, send_control_message)
 
 PAGE_SIZE = 12
 

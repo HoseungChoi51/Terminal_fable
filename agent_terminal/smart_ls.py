@@ -24,10 +24,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from agent_terminal.native_terminal import (CONTROL_SOCKET_ENV,
-                                            is_image_path, is_markdown_path)
-from agent_terminal.tui_core import (control_message, scan_directory,
-                                     send_control_message)
+from agent_terminal.tui_core import (CONTROL_SOCKET_ENV, control_message,
+                                     is_image_path, is_markdown_path,
+                                     scan_directory, send_control_message)
 
 ELLIPSIS = "…"
 SLACK = 4

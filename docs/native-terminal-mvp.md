@@ -58,6 +58,7 @@ large enough.
 | `Alt+Shift+Enter` | Zoom pane (stronger temporary fit) |
 | `Alt+Shift+Space` | Pane control mode |
 | `Alt+Shift+C` | Cycle the active pane's background tint |
+| `Alt+Shift+G` | Move the active pane into another tab/window |
 | `Alt+Shift+Z` / `Alt+Shift+Y` | Undo / redo layout change |
 
 ### Terminal
@@ -65,12 +66,21 @@ large enough.
 | Shortcut | Action |
 | -------- | ------ |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `Ctrl+Alt+C` | Copy as one line — joins rows an app hard-wrapped (e.g. a long command shown by a TUI), drops indents and `\` continuations |
 | `Ctrl+Shift+A` | Select all |
 | `Ctrl+Shift+F` | Find (searches VTE scrollback) |
 | `Ctrl+Shift+G` / `Ctrl+Shift+B` | Find next / previous |
 | `Ctrl+Shift+R` | Reset terminal |
 | `Ctrl+Shift+K` | Clear scrollback |
 | `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Font zoom in / out / reset (active pane only) |
+| `Ctrl+left click` | Open the link under the pointer |
+
+For URLs detected in plain text, opening a link drops trailing prose
+punctuation such as a period or an unmatched closing parenthesis. Balanced
+parentheses and square brackets within the URL are preserved. Explicit
+hyperlinks supplied by applications (OSC 8) use their exact target, including
+any trailing punctuation. For a plain-text URL that intentionally ends in
+sentence punctuation, percent-encode that final character to avoid ambiguity.
 
 ### Viewers
 
