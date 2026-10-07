@@ -993,6 +993,15 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("episode_now = self._current_episode()", SOURCE)
         self.assertIn('"ask-task"', SOURCE)
 
+    def test_idle_focus_grabs_run_once(self):
+        # grab_focus() returns True; handed straight to idle_add it re-runs
+        # forever, and each Gtk.Entry grab re-selects all text, so typing
+        # in the Rename dialog kept only the last character.
+        self.assertIsNone(re.search(r"idle_add\(\s*[\w.]+\.grab_focus\s*\)",
+                                    SOURCE))
+        prompt = SOURCE.split("def _prompt_text", 1)[1].split("\n        def ", 1)[0]
+        self.assertIn("entry.grab_focus(), GLib.SOURCE_REMOVE", prompt)
+
     def test_ssh_keepalive_is_wired(self):
         self.assertIn("def ssh_keepalive_env(assistant)", SOURCE)
 

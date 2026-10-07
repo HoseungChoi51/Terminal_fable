@@ -6137,7 +6137,10 @@ def build_native_classes(g):
             dialog.set_child(box)
             self._close_on_escape(dialog)
             dialog.present()
-            GLib.idle_add(entry.grab_focus)
+            # grab_focus() returns True, which would keep this idle source
+            # alive: GTK re-selects all text on each grab, so every keystroke
+            # replaced the whole entry.  Run it once.
+            GLib.idle_add(lambda: (entry.grab_focus(), GLib.SOURCE_REMOVE)[1])
 
         def rename_active_pane(self):
             tab = self.active_tab()
