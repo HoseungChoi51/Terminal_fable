@@ -306,12 +306,7 @@ that invoke `ssh`. A user-defined `ssh` *function* is preserved rather than
 wrapped, as it may own special transport behavior. Explicit `--command`
 launches, non-Bash shells, and standalone scripts are likewise untouched.
 
-After OpenSSH returns a non-zero status with a recognized disconnect message,
-the pane shows an **SSH disconnected** notice. **Reconnect** places the exact
-recorded command back on the local prompt—without running it—while **Close
-Pane** follows the usual `Ctrl+Shift+W` close path. The app never treats a
-quiet remote command as dead, never auto-reconnects, and never closes a pane
-on its own. If you need to end a currently stuck OpenSSH client immediately,
+If you need to end a currently stuck OpenSSH client immediately,
 press Enter and then type `~.` (the standard local OpenSSH escape).
 
 **A note on a possible brief flash.** The integration works by having
@@ -379,7 +374,7 @@ missing or invalid values fall back to the defaults shown here:
             "max_turns": 8},
     "resume": {"enabled": true, "idle_minutes": 30},
     "ssh": {"keepalive": true, "server_alive_interval_s": 15,
-            "server_alive_count_max": 3, "disconnect_notice": true}
+            "server_alive_count_max": 3}
   }
 }
 ```
@@ -430,7 +425,6 @@ missing or invalid values fall back to the defaults shown here:
 - `resume.enabled` / `resume.idle_minutes` — the idle session-summary chip.
 - `ssh.keepalive` — add scoped OpenSSH server-alive probes in default integrated Bash panes (default on).
 - `ssh.server_alive_interval_s` / `ssh.server_alive_count_max` — probe interval and missed-reply limit; either `0` disables the wrapper.
-- `ssh.disconnect_notice` — show the safe Reconnect / Close Pane notice after a confirmed OpenSSH disconnect.
 
 Sessions are stored under `$XDG_DATA_HOME/agent-terminal/sessions/`
 (see ADR [0009](decisions/0009-session-persistence-format.md)); every

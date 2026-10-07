@@ -993,18 +993,8 @@ class SourceGuardrailTests(unittest.TestCase):
         self.assertIn("episode_now = self._current_episode()", SOURCE)
         self.assertIn('"ask-task"', SOURCE)
 
-    def test_ssh_disconnect_recovery_is_wired_without_auto_run(self):
-        self.assertIn("from agent_terminal.copilot import ssh as copilot_ssh",
-                      SOURCE)
+    def test_ssh_keepalive_is_wired(self):
         self.assertIn("def ssh_keepalive_env(assistant)", SOURCE)
-        self.assertIn("def _maybe_show_ssh_disconnect(self)", SOURCE)
-        self.assertIn("copilot_ssh.is_disconnect(record)", SOURCE)
-        self.assertIn('Gtk.Button(label="Reconnect")', SOURCE)
-        self.assertIn('Gtk.Button(label="Close Pane")', SOURCE)
-        recovery = SOURCE.split("def _show_ssh_disconnect_chip", 1)[1].split(
-            "# -- ghost text", 1)[0]
-        self.assertIn("self.insert_text(command)", recovery)
-        self.assertNotIn('insert_text("\\r")', recovery)
 
     def test_active_pane_cwd_is_wired_into_the_lower_status_bar(self):
         self.assertIn('self._status_path = Gtk.Label(', SOURCE)

@@ -131,7 +131,6 @@ class SshConfig:
     keepalive: bool = True
     server_alive_interval_s: int = 15
     server_alive_count_max: int = 3
-    disconnect_notice: bool = True
 
 
 @dataclass(frozen=True)

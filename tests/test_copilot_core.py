@@ -95,13 +95,11 @@ class ConfigTests(unittest.TestCase):
         cfg = cconfig.parse_assistant_config({
             "ssh": {"keepalive": False,
                     "server_alive_interval_s": 30,
-                    "server_alive_count_max": 5,
-                    "disconnect_notice": False},
+                    "server_alive_count_max": 5},
         }).ssh
         self.assertFalse(cfg.keepalive)
         self.assertEqual(cfg.server_alive_interval_s, 30)
         self.assertEqual(cfg.server_alive_count_max, 5)
-        self.assertFalse(cfg.disconnect_notice)
 
 
 class RedactTests(unittest.TestCase):
