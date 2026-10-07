@@ -444,6 +444,21 @@ class SnippetGuardrailTests(unittest.TestCase):
                          '"$_agentterm_repo" "$_agentterm_branch"'))
             self.assertEqual(outside, "|")
 
+    def test_precmd_resets_stale_mouse_and_focus_reporting(self):
+        # A remote tmux whose SSH link died leaves mouse tracking on; the
+        # prompt hook must switch it off so motion isn't typed into bash.
+        out = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-ic",
+             f". '{SNIPPET}'; _agentterm_precmd"],
+            capture_output=True, text=True, check=True).stdout
+        precmd = out.index("vte.shell.precmd!")
+        for mode in (9, 1000, 1001, 1002, 1003, 1004,
+                     1005, 1006, 1015, 1016):
+            seq = f"\x1b[?{mode}l"
+            self.assertIn(seq, out)
+            self.assertGreater(out.index(seq), precmd)
+        self.assertNotIn("\x1b[?2004l", out)   # Readline owns bracketed paste
+
     def test_emits_all_termprops(self):
         for token in ("vte.shell.preexec", "vte.shell.postexec",
                       "vte.shell.precmd", "vte.ext.agentterm.cmd"):

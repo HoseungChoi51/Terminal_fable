@@ -140,6 +140,16 @@ _agentterm_precmd() {
     [ -n "$cmd" ] && out+=$(printf '\033]666;vte.ext.agentterm.cmd=%s\033\\' \
         "$cmd")
     out+=$(printf '\033]666;vte.shell.precmd!\033\\')
+    # Nothing reads mouse or focus reports at a Bash prompt, so any such
+    # mode still on was left behind by a program that never got to turn it
+    # off -- typically remote tmux/vim whose SSH link died (suspend, network
+    # drop).  VTE would otherwise type every mouse move into Readline as
+    # "^[[<35;12;7M..." and Ctrl+C cannot stop it.  Reset the X10/normal/
+    # button/any-event tracking modes, the UTF-8/SGR/urxvt/SGR-pixel
+    # encodings, and focus reporting.  Bracketed paste (2004) is left to
+    # Readline, which manages it itself.
+    out+=$'\e[?9l\e[?1000l\e[?1001l\e[?1002l\e[?1003l\e[?1004l'
+    out+=$'\e[?1005l\e[?1006l\e[?1015l\e[?1016l'
     printf '%s' "$out"
     _agentterm_update_prompt
     return "$errsv"
