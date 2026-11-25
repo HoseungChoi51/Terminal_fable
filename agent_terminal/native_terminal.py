@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,6 +29,8 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from agent_terminal.copilot import config as assistant_config
 from agent_terminal.copilot import corpus as copilot_corpus
@@ -1285,6 +1288,39 @@ def is_safe_external_uri(uri) -> bool:
     return scheme in SAFE_URI_SCHEMES
 
 
+def local_file_uri_path(uri) -> str | None:
+    """Return the absolute local path for a file:// URI, if it is local."""
+    if not isinstance(uri, str):
+        return None
+    try:
+        parsed = urlparse(uri)
+    except (TypeError, ValueError):
+        return None
+    if (parsed.scheme.lower() != "file"
+            or parsed.netloc.lower() not in ("", "localhost")):
+        return None
+    try:
+        path = url2pathname(parsed.path)
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    if not path or not os.path.isabs(path) or "\0" in path:
+        return None
+    return os.path.abspath(path)
+
+
+def terminal_editor_argv(environ=None) -> list[str]:
+    """Resolve the user's terminal editor without invoking a shell."""
+    environ = os.environ if environ is None else environ
+    for name in ("EDITOR", "VISUAL"):
+        try:
+            argv = shlex.split(environ.get(name, ""))
+        except (TypeError, ValueError):
+            continue
+        if argv:
+            return argv
+    return ["editor" if shutil.which("editor") else "vi"]
+
+
 def trim_url_punctuation(uri: str | None) -> str | None:
     """Remove likely prose suffixes from an automatically matched URL.
 
@@ -2151,7 +2187,12 @@ def build_native_classes(g):
                 return
             uri = self._link_at(x, y)
             _debug_link(f"link under pointer: {uri!r}")
-            if uri and is_safe_external_uri(uri):
+            if not uri:
+                return
+            if self._open_file_link(uri):
+                gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+                return
+            if is_safe_external_uri(uri):
                 gesture.set_state(Gtk.EventSequenceState.CLAIMED)
                 self._open_uri(uri)
 
@@ -2161,6 +2202,27 @@ def build_native_classes(g):
         def _on_link_released(self, gesture, n_press, x, y):
             # Diagnostic only — VTE usually consumes the release first.
             _debug_link(f"released at ({x:.0f},{y:.0f})")
+
+        def _open_file_link(self, uri):
+            """Open a local regular-file link in an editor tab."""
+            path = local_file_uri_path(uri)
+            try:
+                is_file = bool(path and os.path.isfile(path))
+            except (OSError, ValueError):
+                is_file = False
+            if not is_file:
+                return False
+            window = self.terminal.get_root()
+            opener = getattr(window, "open_editor_in_new_tab", None)
+            if opener is None:
+                return False
+            try:
+                opener(path)
+            except Exception as exc:
+                _debug_link(f"editor tab failed for {path!r}: {exc!r}")
+                return False
+            _debug_link(f"editor tab opened for {path!r}")
+            return True
 
         def _open_uri(self, uri):
             """Launch a URL, preferring show_uri and falling back to Gio."""
@@ -2199,6 +2261,9 @@ def build_native_classes(g):
             argv = list(command) if command else [default_shell()]
             env = dict(os.environ)
             env.setdefault("TERM", "xterm-256color")
+            # VTE hyperlink support is enabled in _configure(). Pi otherwise
+            # treats xterm-256color as unknown and suppresses OSC 8 links.
+            env.setdefault("PI_HYPERLINKS", "1")
             if control_socket_path:
                 env[CONTROL_SOCKET_ENV] = control_socket_path
             if extra_env:
@@ -4091,6 +4156,15 @@ def build_native_classes(g):
 
         def open_path_in_new_tab(self, path):
             self._append_tab(TerminalTab(self, self.create_viewer_pane(path)))
+
+        def open_editor_in_new_tab(self, path):
+            """Open a local file with the configured editor in a new tab."""
+            path = os.path.abspath(path)
+            argv = terminal_editor_argv() + [path]
+            return self.add_terminal_tab(
+                command=argv,
+                working_directory=os.path.dirname(path),
+                title=f"Edit {os.path.basename(path)}")
 
         def _append_tab(self, tab):
             self.tabs.append(tab)
